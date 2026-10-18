@@ -1,0 +1,10 @@
+{
+  "repositories": {
+    "pdfcraft": {
+      "url": "https://github.com/storytold/pdfcraft.git",
+      "commit": "50f261d70c8e199600a82dbaa6912c6fbc4b4612",
+      "license": "MIT OR Apache-2.0",
+      "role": "build source; patches/pdfcraft/series applies in order"
+    }
+  }
+}

@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 11:40:48 +0200
+Subject: [PATCH] AROS: normalize native volume prefixes before automation root
+ checks
+
+Use the SDK -nix path contract proven by main/worker path probes. Convert volume-prefixed inputs to Unix absolute paths before joining with a root; retain parent components and reject ambiguous volume syntax. All 15 platform host tests pass; native rooted MCP remains to be rerun.
+---
+ crates/automation/src/file_access.rs |  4 ++++
+ crates/automation/src/lib.rs         |  5 +++++
+ crates/platform/src/lib.rs           | 17 +++++++++++++++++
+ crates/platform/src/paths.rs         | 15 +++++++++++++++
+ crates/platform/src/staging.rs       |  9 +++++----
+ 5 files changed, 46 insertions(+), 4 deletions(-)
+ create mode 100644 crates/platform/src/paths.rs
+
+diff --git a/crates/automation/src/file_access.rs b/crates/automation/src/file_access.rs
+index 55b10662f0c4c7d67280b78cf1688d7070d401e2..049926a1398bcbc94a07c38c0ea58cdeae6430d8 100644
+--- a/crates/automation/src/file_access.rs
++++ b/crates/automation/src/file_access.rs
+@@ -133,6 +133,10 @@ fn resolve(shown: &str, path: &Path) -> Result<PathBuf, String> {
+     if cfg!(windows) && path.components().any(|c| matches!(c, Component::Normal(n) if is_device_name(&n.to_string_lossy()))) {
+         return Err(format!("automation path rejected: reserved device names are not allowed: {shown}"));
+     }
++    #[cfg(target_os = "aros")]
++    let converted = pdfcraft_platform::paths::aros_to_unix(path).map_err(|e| format!("automation path rejected: {shown}: {e}"))?;
++    #[cfg(target_os = "aros")]
++    let path = converted.as_path();
+     let absolute = std::path::absolute(path).map_err(|e| format!("automation path rejected: cannot resolve {shown}: {e}"))?;
+     // The names below the nearest existing folder, last first.
+     let mut missing: Vec<OsString> = vec![];
+diff --git a/crates/automation/src/lib.rs b/crates/automation/src/lib.rs
+index 8a4dcec16c8066681e392d54c99ca72c9ddbbf8d..d1cfd746f5e10583c60fcd8880eb21f6d8cd53e5 100644
+--- a/crates/automation/src/lib.rs
++++ b/crates/automation/src/lib.rs
+@@ -2090,6 +2090,11 @@ impl Automation {
+     }
+ 
+     fn resolve_in_root(&self, path: &str, for_write: bool) -> Result<PathBuf> {
++        #[cfg(target_os = "aros")]
++        let converted = pdfcraft_platform::paths::aros_to_unix(Path::new(path)).map_err(failed)?;
++        #[cfg(target_os = "aros")]
++        let p = converted.as_path();
++        #[cfg(not(target_os = "aros"))]
+         let p = Path::new(path);
+         let Some(root) = &self.root else { return Ok(p.to_path_buf()) };
+         let outside = || failed(format!("{path} is outside the allowed directory {}", root.display()));
+diff --git a/crates/platform/src/lib.rs b/crates/platform/src/lib.rs
+index 684f100d3a6df554e6f8399f82dca9c8271cfe7f..d4fec92492cc041211d825fbbc9b26c9ec7ec8b9 100644
+--- a/crates/platform/src/lib.rs
++++ b/crates/platform/src/lib.rs
+@@ -4,4 +4,21 @@
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+ 
+ pub mod desktop_theme;
++pub mod paths;
+ pub mod staging;
++
++#[cfg(test)]
++mod aros_path_tests {
++    use std::path::Path;
++    #[test]
++    fn native_volume_paths_become_absolute_without_hiding_parent_steps() {
++        assert_eq!(super::paths::aros_to_unix(Path::new("RAM:pdfc/a.pdf")).unwrap(), Path::new("/RAM/pdfc/a.pdf"));
++        assert_eq!(super::paths::aros_to_unix(Path::new("RAM Disk:pdfc/a.pdf")).unwrap(), Path::new("/RAM Disk/pdfc/a.pdf"));
++        assert_eq!(super::paths::aros_to_unix(Path::new("RAM:../outside")).unwrap(), Path::new("/RAM/../outside"));
++        assert_eq!(super::paths::aros_to_unix(Path::new("relative.pdf")).unwrap(), Path::new("relative.pdf"));
++        assert_eq!(super::paths::aros_to_unix(Path::new("/RAM/pdfc")).unwrap(), Path::new("/RAM/pdfc"));
++        for invalid in [":relative-volume", "../RAM:outside", "RAM:other:file", ".:file", "..:file"] {
++            assert!(super::paths::aros_to_unix(Path::new(invalid)).is_err(), "{invalid}");
++        }
++    }
++}
+diff --git a/crates/platform/src/paths.rs b/crates/platform/src/paths.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..034051eaec3786b74aedec6e89096c25998b8dbb
+--- /dev/null
++++ b/crates/platform/src/paths.rs
+@@ -0,0 +1,15 @@
++//! Native AROS volume prefixes at Unix Path-based automation boundaries.
++//! The program must use the SDK -nix startup so the resulting paths are usable.
++use std::path::{Path, PathBuf};
++
++/// Make a native `VOLUME:tail` absolute to Rust's Unix Path implementation.
++/// Keep parent components for the caller's confinement checks; never normalize
++/// them away here. Volume-relative and ambiguous prefixes fail closed.
++pub fn aros_to_unix(path: &Path) -> std::io::Result<PathBuf> {
++    let text = path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 automation path"))?;
++    let Some((volume, tail)) = text.split_once(':') else { return Ok(path.to_path_buf()) };
++    if volume.is_empty() || matches!(volume, "." | "..") || volume.contains(['/', '\\']) || tail.contains(':') {
++        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "ambiguous AROS volume path"));
++    }
++    Ok(PathBuf::from(format!("/{volume}/{}", tail.trim_start_matches('/'))))
++}
+diff --git a/crates/platform/src/staging.rs b/crates/platform/src/staging.rs
+index d1965a5e83d68b2a73bf575123c2c477914724a2..816ae5cc1f38ffda222b44930aa2e93eee4c727f 100644
+--- a/crates/platform/src/staging.rs
++++ b/crates/platform/src/staging.rs
+@@ -66,8 +66,9 @@ pub fn staging_suffixes() -> impl Iterator<Item = u64> {
+ 
+ /// Write `bytes` to `path` through a staging file beside it (see [`create_staging`]; `form`
+ /// names it as the caller always has), flushed to the disk and then renamed over the target: a
+-/// crash, a full disk or a refused flush never leaves a half-written file where a good one was,
+-/// and the target is untouched until the new file is complete. The target's folder must exist;
++/// refused flush never leaves a half-written file where a good one was. On an AROS CRT whose
++/// rename deletes the destination before replacing it, a failure after that deletion retains
++/// the staging file and reports its path; replacement is not atomic there. The target's folder must exist;
+ /// a folder at the target is refused by the rename. Flushing is the staging file's own
+ /// (`sync_all`); parent-directory durability after a power loss is not promised.
+ pub fn write_atomically(path: &Path, bytes: &[u8], form: StagingName) -> std::io::Result<()> {
+@@ -75,8 +76,8 @@ pub fn write_atomically(path: &Path, bytes: &[u8], form: StagingName) -> std::io
+ }
+ 
+ /// [`write_atomically`] with the staging-name suffixes and the flush given, so tests can plant
+-/// names and refuse flushes. A failure at any step removes the staging file and leaves the
+-/// target as it was.
++/// names and refuse flushes. Failed writes/flushes remove the staging file; a destructive
++/// rename failure retains the only new copy and reports its path.
+ pub fn write_atomically_with(
+     path: &Path,
+     bytes: &[u8],

@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:23:56 +0200
+Subject: [PATCH] Register native AROS adapters in the dependency layer checks
+
+---
+ xtask/src/layers.rs | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/xtask/src/layers.rs b/xtask/src/layers.rs
+index a0907cb1a6cf79a26c6157f28d4bba7cb0866f5a..f845b3ff09ed50996a25a6acc27c7133e7122a6f 100644
+--- a/xtask/src/layers.rs
++++ b/xtask/src/layers.rs
+@@ -34,6 +34,8 @@ pub const TABLE: &[(&str, Class)] = &[
+     ("filters", Class::Standalone(0)),
+     ("crypt", Class::Standalone(0)),
+     ("arlington", Class::Standalone(0)),
++    // AROS-only runtime/entropy/SDK glue, with no UI dependencies.
++    ("aros-runtime", Class::Layer(0)),
+     // L1 object layer
+     ("cos", Class::Standalone(1)),
+     // L2 core model
+@@ -78,6 +80,8 @@ pub const TABLE: &[(&str, Class)] = &[
+     ("engine", Class::Layer(6)),
+     // L7 platform + frontends
+     ("platform", Class::Layer(7)),
++    ("aros-dialog", Class::Layer(7)),
++    ("aros-clipboard", Class::Layer(7)),
+     ("ui-common", Class::Layer(7)),
+     ("ui-egui", Class::Layer(7)),
+     ("automation", Class::Layer(7)),
+@@ -87,6 +91,7 @@ pub const TABLE: &[(&str, Class)] = &[
+     // L8 apps + tooling
+     ("pdfcraft", Class::Exempt),
+     ("cli", Class::Exempt),
++    ("aros", Class::Exempt),
+     ("web", Class::Exempt),
+     ("xtask", Class::Exempt),
+ ];
+@@ -104,6 +109,8 @@ pub const SIDEWAYS: &[(&str, &str)] = &[
+     ("sign", "security"),
+     ("ui-egui", "ui-common"),
+     ("ui-egui", "platform"),
++    ("ui-egui", "aros-dialog"),
++    ("ui-egui", "aros-clipboard"),
+     ("automation", "platform"),
+ ];
+ 

@@ -1,0 +1,2987 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:00:45 +0200
+Subject: [PATCH] Add native Intuition frontend for the original PdfCraft egui
+ app
+
+Reuse WordCraft shell source 02628f1ca3f0a5577aa3601b7e5f390bab398fc8, including input, CPU rasterizer and repaint fixes. Expose frame methods while preserving eframe forwarding elsewhere; add ASL/text-clipboard adapters with ownership checks and explicit unsupported image/file-list operations. Native GUI linked; actual GUI acceptance pending. No branded logos embedded for AROS.
+---
+ Cargo.lock                              |  28 +
+ Cargo.toml                              |   1 +
+ apps/pdfcraft-aros/Cargo.toml           |  26 +
+ apps/pdfcraft-aros/build.rs             |  54 ++
+ apps/pdfcraft-aros/c/aros_shell.c       | 648 ++++++++++++++++++++++++
+ apps/pdfcraft-aros/src/ffi.rs           | 402 +++++++++++++++
+ apps/pdfcraft-aros/src/input.rs         | 170 +++++++
+ apps/pdfcraft-aros/src/main.rs          | 468 +++++++++++++++++
+ apps/pdfcraft-aros/src/perf.rs          | 148 ++++++
+ apps/pdfcraft-aros/src/raster.rs        | 443 ++++++++++++++++
+ apps/pdfcraft-aros/src/services.rs      |  82 +++
+ crates/aros-clipboard/Cargo.toml        |   8 +
+ crates/aros-clipboard/src/lib.rs        |  54 ++
+ crates/aros-clipboard/tests/contract.rs |  11 +
+ crates/aros-dialog/Cargo.toml           |   8 +
+ crates/aros-dialog/src/lib.rs           |  83 +++
+ crates/aros-dialog/tests/contract.rs    |  17 +
+ crates/ui-egui/Cargo.toml               |  16 +-
+ crates/ui-egui/src/lib.rs               |  31 +-
+ crates/ui-egui/src/widgets.rs           |  11 +
+ 20 files changed, 2701 insertions(+), 8 deletions(-)
+ create mode 100644 apps/pdfcraft-aros/Cargo.toml
+ create mode 100644 apps/pdfcraft-aros/build.rs
+ create mode 100644 apps/pdfcraft-aros/c/aros_shell.c
+ create mode 100644 apps/pdfcraft-aros/src/ffi.rs
+ create mode 100644 apps/pdfcraft-aros/src/input.rs
+ create mode 100644 apps/pdfcraft-aros/src/main.rs
+ create mode 100644 apps/pdfcraft-aros/src/perf.rs
+ create mode 100644 apps/pdfcraft-aros/src/raster.rs
+ create mode 100644 apps/pdfcraft-aros/src/services.rs
+ create mode 100644 crates/aros-clipboard/Cargo.toml
+ create mode 100644 crates/aros-clipboard/src/lib.rs
+ create mode 100644 crates/aros-clipboard/tests/contract.rs
+ create mode 100644 crates/aros-dialog/Cargo.toml
+ create mode 100644 crates/aros-dialog/src/lib.rs
+ create mode 100644 crates/aros-dialog/tests/contract.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 249436cf018aca868c3bff540898cea4479bec02..4da14c0594e80126981c84a9ab5080a40b6c04f3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3984,6 +3984,31 @@ dependencies = [
+  "thiserror 2.0.21",
+ ]
+ 
++[[package]]
++name = "pdfcraft-aros"
++version = "0.9.0"
++dependencies = [
++ "egui",
++ "image",
++ "log",
++ "pdfcraft-aros-clipboard",
++ "pdfcraft-aros-dialog",
++ "pdfcraft-aros-runtime",
++ "pdfcraft-engine",
++ "pdfcraft-platform",
++ "pdfcraft-ui-egui",
++ "rayon-core",
++ "serde_json",
++]
++
++[[package]]
++name = "pdfcraft-aros-clipboard"
++version = "0.9.0"
++
++[[package]]
++name = "pdfcraft-aros-dialog"
++version = "0.9.0"
++
+ [[package]]
+ name = "pdfcraft-aros-runtime"
+ version = "0.9.0"
+@@ -4121,6 +4146,7 @@ dependencies = [
+  "image",
+  "pdfcraft-a11y",
+  "pdfcraft-annot",
++ "pdfcraft-aros-runtime",
+  "pdfcraft-audit",
+  "pdfcraft-compare",
+  "pdfcraft-cos",
+@@ -4381,6 +4407,8 @@ dependencies = [
+  "objc2 0.6.4",
+  "objc2-app-kit 0.3.2",
+  "objc2-foundation 0.3.2",
++ "pdfcraft-aros-clipboard",
++ "pdfcraft-aros-dialog",
+  "pdfcraft-cos",
+  "pdfcraft-engine",
+  "pdfcraft-fonts",
+diff --git a/Cargo.toml b/Cargo.toml
+index ec890980216bd6fd67efcdcda635bfee9b5b3e14..6de429602dab53a68b8f7393a44568b24a5131a2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -81,6 +81,7 @@ rfd = "0.17"
+ 
+ [workspace.lints.rust]
+ unsafe_code = "forbid"
++unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))'] }
+ 
+ [workspace.lints.clippy]
+ dbg_macro = "warn"
+diff --git a/apps/pdfcraft-aros/Cargo.toml b/apps/pdfcraft-aros/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e362cb06b0ce54480ca9a1c291e9fe2e9451226
+--- /dev/null
++++ b/apps/pdfcraft-aros/Cargo.toml
+@@ -0,0 +1,26 @@
++[package]
++name = "pdfcraft-aros"
++description = "PdfCraft in a native AROS Intuition window"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++build = "build.rs"
++[lints.rust]
++unsafe_code = "allow"
++unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))'] }
++[[bin]]
++name = "PdfCraft"
++path = "src/main.rs"
++[dependencies]
++pdfcraft-engine = { workspace = true }
++pdfcraft-platform = { workspace = true }
++pdfcraft-ui-egui = { workspace = true }
++pdfcraft-aros-runtime = { path = "../../crates/aros-runtime" }
++pdfcraft-aros-dialog = { path = "../../crates/aros-dialog" }
++pdfcraft-aros-clipboard = { path = "../../crates/aros-clipboard" }
++egui = { workspace = true, features = ["default_fonts"] }
++serde_json = { workspace = true }
++log = { workspace = true }
++image = { version = "0.25", default-features = false, features = ["png"] }
++rayon-core = "1.13"
+diff --git a/apps/pdfcraft-aros/build.rs b/apps/pdfcraft-aros/build.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..41596e70d9bcb5603e1f0e76149d7c2cab2ac9af
+--- /dev/null
++++ b/apps/pdfcraft-aros/build.rs
+@@ -0,0 +1,54 @@
++//! Compiles the C side of the shell (`c/aros_shell.c`) with the AROS C cross compiler and links
++//! it in. The compiler and archiver come from `AROS_CC` (or `AROS_GCC`) / `AROS_AR` (the AROS
++//! build system sets them), else `<arch>-aros-cc` / `<arch>-aros-ar` on the PATH (what the Rust
++//! crosstool installs). `AROS_SDK`, when set, is passed as `--sysroot`: the C glue must see the
++//! same SDK headers as the final link, because ABIv1 and ABIv11 inline library calls differently
++//! and a mismatch fails inside the first system call rather than at build time.
++//! On any other target the file is skipped, so the workspace still type-checks on the host.
++
++use std::path::PathBuf;
++use std::process::Command;
++
++fn main() {
++    println!("cargo:rerun-if-changed=c/aros_shell.c");
++    println!("cargo:rerun-if-env-changed=AROS_CC");
++    println!("cargo:rerun-if-env-changed=AROS_AR");
++    println!("cargo:rerun-if-env-changed=AROS_GCC");
++    println!("cargo:rerun-if-env-changed=AROS_SDK");
++    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
++    if os != "aros" {
++        return;
++    }
++    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
++    let cc = std::env::var("AROS_CC").or_else(|_| std::env::var("AROS_GCC")).unwrap_or_else(|_| format!("{arch}-aros-cc"));
++    let ar = std::env::var("AROS_AR").unwrap_or_else(|_| format!("{arch}-aros-ar"));
++    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
++    let obj = out.join("aros_shell.o");
++    let lib = out.join("libpdfcraft_aros_shell.a");
++    let mut compile = Command::new(&cc);
++    if let Ok(sdk) = std::env::var("AROS_SDK") {
++        compile.arg(format!("--sysroot={sdk}"));
++    }
++    let status = compile.args(["-O2", "-Wall", "-Wno-unused-function", "-c", "c/aros_shell.c", "-o"]).arg(&obj).status();
++    match status {
++        Ok(s) if s.success() => {}
++        Ok(s) => panic_build(&format!("{cc} failed with {s}")),
++        Err(e) => panic_build(&format!("cannot run {cc}: {e}")),
++    }
++    let _ = std::fs::remove_file(&lib);
++    let status = Command::new(&ar).arg("crs").arg(&lib).arg(&obj).status();
++    match status {
++        Ok(s) if s.success() => {}
++        Ok(s) => panic_build(&format!("{ar} failed with {s}")),
++        Err(e) => panic_build(&format!("cannot run {ar}: {e}")),
++    }
++    println!("cargo:rustc-link-search=native={}", out.display());
++    println!("cargo:rustc-link-lib=static=pdfcraft_aros_shell");
++}
++
++/// A build script reports its failure through its exit status; this is the one place a panic
++/// is the right tool.
++#[allow(clippy::panic)]
++fn panic_build(msg: &str) -> ! {
++    panic!("pdfcraft-aros build.rs: {msg}");
++}
+diff --git a/apps/pdfcraft-aros/c/aros_shell.c b/apps/pdfcraft-aros/c/aros_shell.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..26599d08403295111a4d8f37913a4bc32e1275b6
+--- /dev/null
++++ b/apps/pdfcraft-aros/c/aros_shell.c
+@@ -0,0 +1,648 @@
++/*
++ * aros_shell.c - the AROS side of PdfCraft's shell.
++ *
++ * One Intuition window on the default public screen, its IDCMP events
++ * translated into plain records the Rust event loop (src/ffi.rs) reads, the
++ * egui frame buffer blitted into it with cybergraphics, keys mapped through
++ * keymap.library, ASL file requesters, the FTXT clipboard through iffparse,
++ * and a timer.device request so the event loop can sleep until egui's next
++ * repaint is due. Everything the Rust side needs is a C function taking the
++ * handle returned by wc_window_open(); library bases come from the AROS
++ * autoinit link libraries.
++ */
++
++#include <proto/exec.h>
++#include <proto/dos.h>
++#include <proto/intuition.h>
++#include <proto/graphics.h>
++#include <proto/cybergraphics.h>
++#include <proto/keymap.h>
++#include <proto/asl.h>
++#include <proto/iffparse.h>
++#include <proto/utility.h>
++
++#include <exec/memory.h>
++#include <dos/dosextens.h>
++#include <exec/ports.h>
++#include <exec/execbase.h>
++#include <stdio.h>
++#include <intuition/intuition.h>
++#include <intuition/screens.h>
++#include <cybergraphx/cybergraphics.h>
++#include <devices/inputevent.h>
++#include <devices/rawkeycodes.h>
++#include <devices/timer.h>
++#include <libraries/asl.h>
++#include <libraries/iffparse.h>
++#include <workbench/startup.h>
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define ID_FTXT MAKE_ID('F', 'T', 'X', 'T')
++#define ID_CHRS MAKE_ID('C', 'H', 'R', 'S')
++
++/* Event kinds, mirrored in src/ffi.rs. */
++enum wc_event_kind {
++    WC_EV_NONE = 0,
++    WC_EV_CLOSE = 1,
++    WC_EV_RESIZE = 2,
++    WC_EV_MOUSE_MOVE = 3,
++    WC_EV_BUTTON = 4,
++    WC_EV_KEY = 5,
++    WC_EV_WHEEL = 6,
++    WC_EV_FOCUS = 7,
++    WC_EV_REFRESH = 8,
++};
++
++/* One translated IDCMP message, mirrored in src/ffi.rs (keep the layout in sync). */
++struct wc_event {
++    int32_t kind;
++    int32_t x, y;          /* pointer position in inner-window pixels */
++    int32_t button;        /* WC_EV_BUTTON: 0 left, 1 right, 2 middle */
++    int32_t down;          /* WC_EV_BUTTON / WC_EV_KEY: pressed */
++    int32_t rawkey;        /* WC_EV_KEY: RAWKEY_* code */
++    uint32_t qualifier;    /* IEQUALIFIER_* at the time of the event */
++    int32_t wheel_x, wheel_y; /* WC_EV_WHEEL: steps, right and up positive */
++    int32_t width, height; /* WC_EV_RESIZE: the new inner size */
++    int32_t focus;         /* WC_EV_FOCUS: 1 activated, 0 deactivated */
++    char text[16];         /* WC_EV_KEY: the key with its qualifiers (system charset), NUL ended */
++    char plain[8];         /* WC_EV_KEY: the key with no qualifiers, for the logical key name */
++    uint32_t secs, micros; /* the message's system time (IntuiMessage Seconds/Micros) */
++};
++
++struct wc_window {
++    struct Window *win;
++    struct MsgPort *timer_port;
++    struct timerequest *timer_req;
++    int timer_open;
++    int timer_pending;
++    struct Task *task;
++    LONG wake_sig;         /* signal other threads raise to wake the event loop */
++    char title[256];
++    uint32_t qualifier;    /* last seen qualifiers (Caps Lock state for the app) */
++};
++
++static void stop_timer(struct wc_window *w)
++{
++    if (w->timer_pending) {
++        if (!CheckIO((struct IORequest *)w->timer_req))
++            AbortIO((struct IORequest *)w->timer_req);
++        WaitIO((struct IORequest *)w->timer_req);
++        w->timer_pending = 0;
++    }
++}
++
++static void start_timer(struct wc_window *w, int ms)
++{
++    stop_timer(w);
++    if (!w->timer_open || ms <= 0)
++        return;
++    w->timer_req->tr_node.io_Command = TR_ADDREQUEST;
++    w->timer_req->tr_time.tv_secs = ms / 1000;
++    w->timer_req->tr_time.tv_micro = (ms % 1000) * 1000;
++    SendIO((struct IORequest *)w->timer_req);
++    w->timer_pending = 1;
++}
++
++/* The public screen's size, for placing and limiting the window. */
++void wc_screen_size(int32_t *width, int32_t *height)
++{
++    struct Screen *scr = LockPubScreen(NULL);
++    *width = 1024;
++    *height = 768;
++    if (scr) {
++        *width = scr->Width;
++        *height = scr->Height;
++        UnlockPubScreen(NULL, scr);
++    }
++}
++
++struct wc_window *wc_window_open(int32_t width, int32_t height, const char *title)
++{
++    struct wc_window *w = calloc(1, sizeof *w);
++    int32_t sw, sh;
++    if (!w)
++        return NULL;
++    strncpy(w->title, title ? title : "PdfCraft", sizeof w->title - 1);
++    w->task = FindTask(NULL);
++    w->wake_sig = AllocSignal(-1);
++    if (w->wake_sig >= 0)
++        SetSignal(0, 1UL << w->wake_sig);
++
++    wc_screen_size(&sw, &sh);
++    if (width > sw - 16) width = sw - 16;
++    if (height > sh - 48) height = sh - 48;
++    if (width < 320) width = 320;
++    if (height < 240) height = 240;
++
++    w->win = OpenWindowTags(NULL,
++        WA_Left, (sw - width) / 2 > 0 ? (sw - width) / 2 : 0,
++        WA_Top, (sh - height) / 2 > 0 ? (sh - height) / 2 : 0,
++        WA_InnerWidth, width,
++        WA_InnerHeight, height,
++        WA_MinWidth, 320,
++        WA_MinHeight, 240,
++        WA_MaxWidth, ~0,
++        WA_MaxHeight, ~0,
++        WA_Title, (IPTR)w->title,
++        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_SIZEGADGET
++                | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE | WFLG_REPORTMOUSE | WFLG_RMBTRAP
++                | WFLG_GIMMEZEROZERO | WFLG_NOCAREREFRESH,
++        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_NEWSIZE | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE
++                | IDCMP_RAWKEY | IDCMP_ACTIVEWINDOW | IDCMP_INACTIVEWINDOW,
++        TAG_DONE);
++    if (!w->win) {
++        if (w->wake_sig >= 0) FreeSignal(w->wake_sig);
++        free(w);
++        return NULL;
++    }
++
++    w->timer_port = CreateMsgPort();
++    if (w->timer_port) {
++        SetSignal(0, 1UL << w->timer_port->mp_SigBit);
++        w->timer_req = (struct timerequest *)CreateIORequest(w->timer_port, sizeof(struct timerequest));
++        if (w->timer_req && OpenDevice((CONST_STRPTR)"timer.device", UNIT_MICROHZ, (struct IORequest *)w->timer_req, 0) == 0)
++            w->timer_open = 1;
++    }
++    return w;
++}
++
++void wc_window_close(struct wc_window *w)
++{
++    if (!w)
++        return;
++    stop_timer(w);
++    if (w->timer_open)
++        CloseDevice((struct IORequest *)w->timer_req);
++    if (w->timer_req)
++        DeleteIORequest((struct IORequest *)w->timer_req);
++    if (w->timer_port)
++        DeleteMsgPort(w->timer_port);
++    if (w->win)
++        CloseWindow(w->win);
++    if (w->wake_sig >= 0)
++        FreeSignal(w->wake_sig);
++    free(w);
++}
++
++void wc_window_inner_size(struct wc_window *w, int32_t *width, int32_t *height)
++{
++    *width = w->win->GZZWidth;
++    *height = w->win->GZZHeight;
++}
++
++/* Sleeps until a window message, a wake-up from wc_window_wake() or the
++ * timeout (milliseconds; negative waits for messages only). Returns 1 when a
++ * window message or wake-up arrived, 0 on timeout. The timer is judged by its
++ * request (CheckIO), never by its signal alone: a signal bit can be left set
++ * from an earlier use, and that must not count as a timeout. */
++int32_t wc_window_wait(struct wc_window *w, int32_t timeout_ms)
++{
++    ULONG winsig = 1UL << w->win->UserPort->mp_SigBit;
++    ULONG wakesig = w->wake_sig >= 0 ? 1UL << w->wake_sig : 0;
++    ULONG timersig = 0;
++    ULONG got;
++
++    /* egui wants the next frame at once: still block for a moment so the
++     * other tasks run (the file-open and save workers, the font scan); a
++     * frame loop that never waits starves them. A millisecond is nothing
++     * next to a software-rendered frame. */
++    if (timeout_ms == 0)
++        timeout_ms = w->timer_open ? 1 : 0;
++    if (timeout_ms == 0)
++        return 1;
++    if (w->timer_open && timeout_ms > 0) {
++        start_timer(w, timeout_ms);
++        timersig = 1UL << w->timer_port->mp_SigBit;
++    }
++    for (;;) {
++        got = Wait(winsig | wakesig | timersig);
++        if (got & (winsig | wakesig)) {
++            stop_timer(w);
++            return 1;
++        }
++        if (w->timer_pending && CheckIO((struct IORequest *)w->timer_req)) {
++            WaitIO((struct IORequest *)w->timer_req);
++            w->timer_pending = 0;
++            return 0;
++        }
++        if (!timersig)
++            return 1;
++        /* a stale timer signal: the request is still running, keep waiting */
++    }
++}
++
++/* The system time in the clock IntuiMessages are stamped with, for measuring
++ * how long an event waited until its frame was shown. */
++void wc_systime(uint32_t *secs, uint32_t *micros)
++{
++    ULONG s = 0, m = 0;
++    CurrentTime(&s, &m);
++    *secs = s;
++    *micros = m;
++}
++
++/* Wakes the event loop from any task (egui's request_repaint from a worker thread). */
++void wc_window_wake(struct wc_window *w)
++{
++    if (w && w->wake_sig >= 0)
++        Signal(w->task, 1UL << w->wake_sig);
++}
++
++static void map_key(struct wc_window *w, struct IntuiMessage *imsg, struct wc_event *ev)
++{
++    struct InputEvent ie;
++    UWORD code = imsg->Code & ~IECODE_UP_PREFIX;
++    LONG n;
++
++    memset(&ie, 0, sizeof ie);
++    ie.ie_Class = IECLASS_RAWKEY;
++    ie.ie_Code = code;
++    /* Control and Amiga combinations map to control characters; the app wants
++     * the plain key under them, so those qualifiers are left out here. */
++    ie.ie_Qualifier = imsg->Qualifier & ~(IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND);
++    if (imsg->IAddress)
++        ie.ie_EventAddress = (APTR *)*((IPTR *)imsg->IAddress);
++    n = MapRawKey(&ie, (STRPTR)ev->text, sizeof ev->text - 1, NULL);
++    if (n < 0) n = 0;
++    ev->text[n] = 0;
++
++    ie.ie_Qualifier = 0;
++    ie.ie_EventAddress = NULL;
++    n = MapRawKey(&ie, (STRPTR)ev->plain, sizeof ev->plain - 1, NULL);
++    if (n < 0) n = 0;
++    ev->plain[n] = 0;
++    (void)w;
++}
++
++/* Fills the next translated event; returns 0 when there is none waiting. */
++int32_t wc_window_poll(struct wc_window *w, struct wc_event *ev)
++{
++    struct IntuiMessage *imsg;
++
++    memset(ev, 0, sizeof *ev);
++    while ((imsg = (struct IntuiMessage *)GetMsg(w->win->UserPort))) {
++        ULONG cls = imsg->Class;
++        UWORD code = imsg->Code;
++        UWORD qual = imsg->Qualifier;
++        /* The message's position is relative to the outer window; the frame is the
++         * GimmeZeroZero inner area, which starts after the borders. */
++        WORD mx = imsg->MouseX - w->win->BorderLeft, my = imsg->MouseY - w->win->BorderTop;
++
++        w->qualifier = qual;
++        ev->x = mx;
++        ev->y = my;
++        ev->qualifier = qual;
++        ev->secs = imsg->Seconds;
++        ev->micros = imsg->Micros;
++
++        switch (cls) {
++        case IDCMP_CLOSEWINDOW:
++            ReplyMsg((struct Message *)imsg);
++            ev->kind = WC_EV_CLOSE;
++            return 1;
++        case IDCMP_NEWSIZE:
++            ReplyMsg((struct Message *)imsg);
++            ev->kind = WC_EV_RESIZE;
++            ev->width = w->win->GZZWidth;
++            ev->height = w->win->GZZHeight;
++            return 1;
++        case IDCMP_MOUSEMOVE:
++            ReplyMsg((struct Message *)imsg);
++            ev->kind = WC_EV_MOUSE_MOVE;
++            return 1;
++        case IDCMP_MOUSEBUTTONS:
++            ReplyMsg((struct Message *)imsg);
++            ev->kind = WC_EV_BUTTON;
++            ev->down = (code & IECODE_UP_PREFIX) ? 0 : 1;
++            switch (code & ~IECODE_UP_PREFIX) {
++            case IECODE_LBUTTON: ev->button = 0; break;
++            case IECODE_RBUTTON: ev->button = 1; break;
++            case IECODE_MBUTTON: ev->button = 2; break;
++            default: ev->kind = WC_EV_NONE; continue;
++            }
++            return 1;
++        case IDCMP_RAWKEY: {
++            UWORD key = code & ~IECODE_UP_PREFIX;
++            if (key >= RAWKEY_NM_WHEEL_UP && key <= RAWKEY_NM_WHEEL_RIGHT) {
++                ReplyMsg((struct Message *)imsg);
++                if (code & IECODE_UP_PREFIX)
++                    continue;
++                ev->kind = WC_EV_WHEEL;
++                switch (key) {
++                case RAWKEY_NM_WHEEL_UP: ev->wheel_y = 1; break;
++                case RAWKEY_NM_WHEEL_DOWN: ev->wheel_y = -1; break;
++                case RAWKEY_NM_WHEEL_LEFT: ev->wheel_x = -1; break;
++                default: ev->wheel_x = 1; break;
++                }
++                return 1;
++            }
++            ev->kind = WC_EV_KEY;
++            ev->rawkey = key;
++            ev->down = (code & IECODE_UP_PREFIX) ? 0 : 1;
++            if (ev->down)
++                map_key(w, imsg, ev);
++            ReplyMsg((struct Message *)imsg);
++            return 1;
++        }
++        case IDCMP_ACTIVEWINDOW:
++        case IDCMP_INACTIVEWINDOW:
++            ReplyMsg((struct Message *)imsg);
++            ev->kind = WC_EV_FOCUS;
++            ev->focus = cls == IDCMP_ACTIVEWINDOW;
++            return 1;
++        default:
++            ReplyMsg((struct Message *)imsg);
++            continue;
++        }
++    }
++    return 0;
++}
++
++uint32_t wc_window_qualifier(struct wc_window *w)
++{
++    return w->qualifier;
++}
++
++/* Copies an RGBA (byte order R, G, B, A) frame buffer into the window's inner area. */
++void wc_window_blit(struct wc_window *w, const uint8_t *rgba, int32_t width, int32_t height, int32_t stride)
++{
++    int32_t iw = w->win->GZZWidth, ih = w->win->GZZHeight;
++    if (width > iw) width = iw;
++    if (height > ih) height = ih;
++    if (width <= 0 || height <= 0)
++        return;
++    WritePixelArray((APTR)rgba, 0, 0, stride, w->win->RPort, 0, 0, width, height, RECTFMT_RGBA);
++}
++
++void wc_window_set_busy(struct wc_window *w, int32_t busy)
++{
++    SetWindowPointer(w->win, WA_BusyPointer, busy ? TRUE : FALSE, TAG_DONE);
++}
++
++void wc_window_set_title(struct wc_window *w, const char *title)
++{
++    strncpy(w->title, title ? title : "", sizeof w->title - 1);
++    w->title[sizeof w->title - 1] = 0;
++    SetWindowTitles(w->win, (CONST_STRPTR)w->title, (CONST_STRPTR)~0);
++}
++
++void wc_window_activate(struct wc_window *w)
++{
++    ActivateWindow(w->win);
++}
++
++/* The event loop's task priority. A task that keeps the CPU is not time-sliced
++ * against equal-priority tasks on every AROS flavour, so while background
++ * work runs (file opens and saves, the font scan) the loop drops below the
++ * workers' priority 0 and only draws when they wait. */
++void wc_window_set_priority(struct wc_window *w, int32_t pri)
++{
++    SetTaskPri(w->task, pri);
++}
++
++void wc_beep(void)
++{
++    DisplayBeep(NULL);
++}
++
++/*
++ * The requester's drawer as an absolute path in `buf`. ASL hands back what
++ * the user typed or browsed to: an empty drawer (the current directory) or a
++ * relative one ("/out dir") is resolved against the current directory, which
++ * the opener of the file does not share (a program started from Workbench
++ * runs in its own drawer). Falls back to the drawer as given.
++ */
++static void absolute_drawer(const char *drawer, char *buf, LONG size)
++{
++    BPTR lock;
++    buf[0] = 0;
++    if (!drawer)
++        drawer = "";
++    lock = Lock((CONST_STRPTR)drawer, SHARED_LOCK);
++    if (lock) {
++        BOOL ok = NameFromLock(lock, (STRPTR)buf, size);
++        UnLock(lock);
++        if (ok)
++            return;
++    }
++    strncpy(buf, drawer, size - 1);
++    buf[size - 1] = 0;
++}
++
++/*
++ * An ASL file requester. `save` selects save mode, `multi` multi-selection;
++ * `dir`, `file` and `pattern` may be empty. The chosen paths are written to
++ * `out`, separated by newlines; returns the number of paths (0: cancelled or
++ * nothing fits).
++ */
++int32_t wc_file_request(struct wc_window *w, int32_t save, int32_t multi, const char *title,
++                        const char *dir, const char *file, const char *pattern, char *out, int32_t outlen)
++{
++    struct FileRequester *req;
++    int32_t count = 0;
++    char path[1024];
++
++    if (!out || outlen < 2)
++        return 0;
++    out[0] = 0;
++    req = AllocAslRequestTags(ASL_FileRequest,
++        ASLFR_Window, (IPTR)(w ? w->win : NULL),
++        ASLFR_TitleText, (IPTR)(title ? title : "Select file"),
++        ASLFR_InitialDrawer, (IPTR)(dir ? dir : ""),
++        ASLFR_InitialFile, (IPTR)(file ? file : ""),
++        ASLFR_DoSaveMode, save ? TRUE : FALSE,
++        ASLFR_DoMultiSelect, (multi == 1 && !save) ? TRUE : FALSE,
++        ASLFR_DrawersOnly, multi == 2 ? TRUE : FALSE,
++        ASLFR_DoPatterns, (pattern && pattern[0]) ? TRUE : FALSE,
++        ASLFR_InitialPattern, (IPTR)((pattern && pattern[0]) ? pattern : "#?"),
++        ASLFR_RejectIcons, TRUE,
++        TAG_DONE);
++    if (!req)
++        return 0;
++    if (AslRequestTags(req, TAG_DONE)) {
++        if (multi == 2) {
++            absolute_drawer((const char *)req->fr_Drawer, path, sizeof path);
++            if (strlen(path) + 1 <= (size_t)outlen) { strcpy(out, path); count = 1; }
++        } else if (multi == 1 && !save && req->fr_NumArgs > 0) {
++            LONG i;
++            for (i = 0; i < req->fr_NumArgs; i++) {
++                absolute_drawer((const char *)req->fr_Drawer, path, sizeof path);
++                if (!AddPart((STRPTR)path, (CONST_STRPTR)req->fr_ArgList[i].wa_Name, sizeof path))
++                    continue;
++                if (strlen(out) + strlen(path) + 2 > (size_t)outlen)
++                    break;
++                if (count)
++                    strcat(out, "\n");
++                strcat(out, path);
++                count++;
++            }
++        } else if (req->fr_File && req->fr_File[0]) {
++            absolute_drawer((const char *)req->fr_Drawer, path, sizeof path);
++            if (AddPart((STRPTR)path, (CONST_STRPTR)req->fr_File, sizeof path) && strlen(path) + 1 <= (size_t)outlen) {
++                strcpy(out, path);
++                count = 1;
++            }
++        }
++    }
++    FreeAslRequest(req);
++    return count;
++}
++
++/* Writes `len` bytes of text (system charset) to the clipboard as FTXT. */
++int32_t wc_clip_write_text(const char *text, int32_t len)
++{
++    struct IFFHandle *iff = AllocIFF();
++    int32_t ok = 0;
++    if (!iff)
++        return 0;
++    iff->iff_Stream = (IPTR)OpenClipboard(0);
++    if (iff->iff_Stream) {
++        InitIFFasClip(iff);
++        if (OpenIFF(iff, IFFF_WRITE) == 0) {
++            if (PushChunk(iff, ID_FTXT, ID_FORM, IFFSIZE_UNKNOWN) == 0) {
++                if (PushChunk(iff, 0, ID_CHRS, len) == 0) {
++                    ok = WriteChunkBytes(iff, (APTR)text, len) == len;
++                    PopChunk(iff);
++                }
++                PopChunk(iff);
++            }
++            CloseIFF(iff);
++        }
++        CloseClipboard((struct ClipboardHandle *)iff->iff_Stream);
++    }
++    FreeIFF(iff);
++    return ok;
++}
++
++/* Reads the clipboard's FTXT text into `out` (NUL ended); returns its length, or 0. */
++int32_t wc_clip_read_text(char *out, int32_t outlen)
++{
++    struct IFFHandle *iff = AllocIFF();
++    int32_t total = 0;
++    if (!iff || !out || outlen < 1)
++        return 0;
++    out[0] = 0;
++    iff->iff_Stream = (IPTR)OpenClipboard(0);
++    if (iff->iff_Stream) {
++        InitIFFasClip(iff);
++        if (OpenIFF(iff, IFFF_READ) == 0) {
++            if (StopChunk(iff, ID_FTXT, ID_CHRS) == 0) {
++                while (ParseIFF(iff, IFFPARSE_SCAN) == 0) {
++                    struct ContextNode *cn = CurrentChunk(iff);
++                    if (cn && cn->cn_Type == ID_FTXT && cn->cn_ID == ID_CHRS) {
++                        LONG want = cn->cn_Size;
++                        if (want > outlen - 1 - total)
++                            want = outlen - 1 - total;
++                        if (want > 0) {
++                            LONG got = ReadChunkBytes(iff, out + total, want);
++                            if (got > 0)
++                                total += got;
++                        }
++                    }
++                }
++            }
++            CloseIFF(iff);
++        }
++        CloseClipboard((struct ClipboardHandle *)iff->iff_Stream);
++    }
++    FreeIFF(iff);
++    out[total] = 0;
++    return total;
++}
++
++/* Hands a URL to the system's OpenURL command (openurl.library's front end).
++ * The Rust side percent-encodes quotes, `*`, spaces and control bytes, so the
++ * URL cannot end the quoted argument; anything else is refused here too.
++ * SystemTags gives the command a DupLock of our PROGDIR: (pr_HomeDir) that it
++ * may never release, which keeps the program's drawer "in use" until reboot;
++ * on ABIv11 SystemTags drops an NP_HomeDir tag, so the home directory is
++ * cleared for the duration of the call instead. */
++int32_t wc_open_url(const char *url)
++{
++    char cmd[2048];
++    const char *p;
++    struct Process *me = (struct Process *)FindTask(NULL);
++    BPTR home;
++    LONG rc;
++    if (!url || strlen(url) > sizeof cmd - 16)
++        return 0;
++    for (p = url; *p; p++)
++        if (*p == '"' || *p == '*' || (unsigned char)*p <= ' ' || (unsigned char)*p >= 0x7f)
++            return 0;
++    strcpy(cmd, "OpenURL \"");
++    strcat(cmd, url);
++    strcat(cmd, "\"");
++    home = me->pr_HomeDir;
++    me->pr_HomeDir = BNULL;
++    rc = SystemTags((CONST_STRPTR)cmd, SYS_Asynch, FALSE, TAG_DONE);
++    me->pr_HomeDir = home;
++    return rc == 0;
++}
++
++int32_t wc_debug_tasks(char *out, int32_t outlen);
++
++/* Diagnostics: every task exec knows of (this one, the ready and the waiting
++ * ones) as "name|state|pri|sigwait|sigrecvd" lines. Used to see which threads
++ * are still alive when the program exits: AROS's pthread library waits for
++ * all of them. Returns the number of bytes written to `out`. */
++static int32_t append_task(char *out, int32_t outlen, int32_t len, struct Task *t, const char *state)
++{
++    int n;
++    if (len >= outlen - 1)
++        return len;
++    n = snprintf(out + len, outlen - len, "%s|%s|%d|%08lx|%08lx\n",
++                 t->tc_Node.ln_Name ? t->tc_Node.ln_Name : "?", state, (int)t->tc_Node.ln_Pri,
++                 (unsigned long)t->tc_SigWait, (unsigned long)t->tc_SigRecvd);
++    if (n < 0)
++        return len;
++    return len + n < outlen ? len + n : outlen - 1;
++}
++
++/* Words on a waiting pthread's stack that point into this program's code:
++ * candidate return addresses, which the host maps to functions with nm after
++ * subtracting the anchor's load offset. A heuristic stack scan, diagnostics only. */
++static int32_t append_stack(char *out, int32_t outlen, int32_t len, struct Task *t)
++{
++    IPTR lo = (IPTR)&wc_debug_tasks - 0x4000000, hi = (IPTR)&wc_debug_tasks + 0x4000000;
++    IPTR *sp = (IPTR *)t->tc_SPReg, *top = (IPTR *)t->tc_SPUpper;
++    int found = 0, n;
++    if (!sp || !top || sp >= top || top - sp > 65536)
++        return len;
++    for (; sp < top && found < 48 && len < outlen - 24; sp++) {
++        if (*sp >= lo && *sp < hi) {
++            n = snprintf(out + len, outlen - len, " %lx", (unsigned long)*sp);
++            if (n > 0)
++                len += n;
++            found++;
++        }
++    }
++    if (len < outlen - 1) {
++        out[len++] = '\n';
++        out[len] = 0;
++    }
++    return len;
++}
++
++int32_t wc_debug_tasks(char *out, int32_t outlen)
++{
++    struct Node *n;
++    int32_t len = 0;
++    if (!out || outlen < 2)
++        return 0;
++    out[0] = 0;
++    len = snprintf(out, outlen, "anchor wc_debug_tasks=%lx\n", (unsigned long)(IPTR)&wc_debug_tasks);
++    Forbid();
++    len = append_task(out, outlen, len, FindTask(NULL), "running");
++    for (n = SysBase->TaskReady.lh_Head; n->ln_Succ; n = n->ln_Succ)
++        len = append_task(out, outlen, len, (struct Task *)n, "ready");
++    for (n = SysBase->TaskWait.lh_Head; n->ln_Succ; n = n->ln_Succ) {
++        len = append_task(out, outlen, len, (struct Task *)n, "wait");
++        if (n->ln_Name && strncmp(n->ln_Name, "pthread", 7) == 0)
++            len = append_stack(out, outlen, len, (struct Task *)n);
++    }
++    Permit();
++    return len;
++}
+diff --git a/apps/pdfcraft-aros/src/ffi.rs b/apps/pdfcraft-aros/src/ffi.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..daf9b674ecb264b2d9c02e084dd2015912d9bbd0
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/ffi.rs
+@@ -0,0 +1,402 @@
++//! The C side of the shell (`c/aros_shell.c`), wrapped for the Rust event loop: the window and
++//! its events, the frame buffer blit, the timer-backed wait, ASL requesters, the clipboard.
++//!
++//! `wc_event` and the event kinds mirror the C definitions; keep them in sync.
++
++use std::ffi::{CStr, CString};
++use std::os::raw::{c_char, c_int};
++
++pub const EV_CLOSE: i32 = 1;
++pub const EV_RESIZE: i32 = 2;
++pub const EV_MOUSE_MOVE: i32 = 3;
++pub const EV_BUTTON: i32 = 4;
++pub const EV_KEY: i32 = 5;
++pub const EV_WHEEL: i32 = 6;
++pub const EV_FOCUS: i32 = 7;
++
++/// `IEQUALIFIER_*` bits (devices/inputevent.h).
++pub const Q_LSHIFT: u32 = 1 << 0;
++pub const Q_RSHIFT: u32 = 1 << 1;
++pub const Q_CONTROL: u32 = 1 << 3;
++pub const Q_LALT: u32 = 1 << 4;
++pub const Q_RALT: u32 = 1 << 5;
++pub const Q_LCOMMAND: u32 = 1 << 6;
++pub const Q_RCOMMAND: u32 = 1 << 7;
++pub const Q_REPEAT: u32 = 1 << 9;
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct WcEvent {
++    pub kind: i32,
++    pub x: i32,
++    pub y: i32,
++    pub button: i32,
++    pub down: i32,
++    pub rawkey: i32,
++    pub qualifier: u32,
++    pub wheel_x: i32,
++    pub wheel_y: i32,
++    pub width: i32,
++    pub height: i32,
++    pub focus: i32,
++    pub text: [u8; 16],
++    pub plain: [u8; 8],
++    pub secs: u32,
++    pub micros: u32,
++}
++
++impl WcEvent {
++    fn zeroed() -> Self {
++        Self {
++            kind: 0,
++            x: 0,
++            y: 0,
++            button: 0,
++            down: 0,
++            rawkey: 0,
++            qualifier: 0,
++            wheel_x: 0,
++            wheel_y: 0,
++            width: 0,
++            height: 0,
++            focus: 0,
++            text: [0; 16],
++            plain: [0; 8],
++            secs: 0,
++            micros: 0,
++        }
++    }
++
++    /// When Intuition stamped the message, in microseconds of system time (see [`systime_us`]).
++    pub fn time_us(&self) -> i64 {
++        self.secs as i64 * 1_000_000 + self.micros as i64
++    }
++
++    /// The typed characters, converted from the system charset (ISO 8859-1 on AROS) to UTF-8.
++    pub fn text(&self) -> String {
++        latin1(&self.text)
++    }
++
++    /// The key with no qualifiers held, for naming the logical key.
++    pub fn plain(&self) -> String {
++        latin1(&self.plain)
++    }
++}
++
++fn latin1(bytes: &[u8]) -> String {
++    bytes.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect()
++}
++
++#[repr(C)]
++pub struct WcWindow {
++    _private: [u8; 0],
++}
++
++unsafe extern "C" {
++    fn wc_screen_size(width: *mut i32, height: *mut i32);
++    fn wc_window_open(width: i32, height: i32, title: *const c_char) -> *mut WcWindow;
++    fn wc_window_close(w: *mut WcWindow);
++    fn wc_window_inner_size(w: *mut WcWindow, width: *mut i32, height: *mut i32);
++    fn wc_window_wait(w: *mut WcWindow, timeout_ms: i32) -> i32;
++    fn wc_window_wake(w: *mut WcWindow);
++    fn wc_window_poll(w: *mut WcWindow, ev: *mut WcEvent) -> i32;
++    fn wc_window_blit(w: *mut WcWindow, rgba: *const u8, width: i32, height: i32, stride: i32);
++    fn wc_window_set_busy(w: *mut WcWindow, busy: i32);
++    fn wc_systime(secs: *mut u32, micros: *mut u32);
++    fn wc_window_set_title(w: *mut WcWindow, title: *const c_char);
++    fn wc_file_request(
++        w: *mut WcWindow,
++        save: i32,
++        multi: i32,
++        title: *const c_char,
++        dir: *const c_char,
++        file: *const c_char,
++        pattern: *const c_char,
++        out: *mut c_char,
++        outlen: i32,
++    ) -> i32;
++    fn wc_clip_write_text(text: *const c_char, len: i32) -> i32;
++    fn wc_clip_read_text(out: *mut c_char, outlen: i32) -> i32;
++    fn wc_open_url(url: *const c_char) -> c_int;
++    fn wc_debug_tasks(out: *mut c_char, outlen: i32) -> i32;
++}
++
++/// A C string of `bytes`, cut at the first NUL (interior NULs cannot be passed through).
++fn cbytes(bytes: Vec<u8>) -> CString {
++    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
++    CString::new(&bytes[..end]).unwrap_or_default()
++}
++
++/// Text shown by the system (window titles, requester titles, patterns, FTXT): converted to
++/// the system charset, ISO 8859-1.
++fn text_cstring(s: &str) -> CString {
++    cbytes(to_latin1(s))
++}
++
++/// A path handed to DOS: passed byte for byte. Rust's std hands path bytes to DOS unchanged, so
++/// a path must reach the requester exactly as the program will open it; converting it to
++/// ISO 8859-1 here would name a different file than the one opened later.
++fn path_cstring(s: &str) -> CString {
++    cbytes(s.as_bytes().to_vec())
++}
++
++/// Converts UTF-8 to the system charset (ISO 8859-1). Common punctuation outside it gets its
++/// plain equivalent (the window title uses an em dash); anything else becomes `?`.
++fn to_latin1(s: &str) -> Vec<u8> {
++    let mut out = Vec::with_capacity(s.len());
++    for c in s.chars() {
++        match c as u32 {
++            n if n < 256 => out.push(n as u8),
++            0x2010..=0x2015 | 0x2212 => out.push(b'-'),
++            0x2018 | 0x2019 | 0x201a => out.push(b'\''),
++            0x201c | 0x201d | 0x201e => out.push(b'"'),
++            0x2026 => out.extend_from_slice(b"..."),
++            _ => out.push(b'?'),
++        }
++    }
++    out
++}
++
++/// A path the requester returned, as the program will use it: unchanged when the bytes are
++/// UTF-8 (every name this program writes, and every ASCII name). Other bytes are ISO 8859-1
++/// names that a UTF-8 `String` cannot carry byte for byte; they are converted so the name reads
++/// correctly in the error that opening it will then report.
++fn path_from_bytes(bytes: &[u8]) -> String {
++    match std::str::from_utf8(bytes) {
++        Ok(s) => s.to_string(),
++        Err(_) => latin1(bytes),
++    }
++}
++
++/// The screen's size in pixels.
++pub fn screen_size() -> (i32, i32) {
++    let (mut w, mut h) = (0, 0);
++    // SAFETY: plain out-parameters.
++    unsafe { wc_screen_size(&mut w, &mut h) };
++    (w, h)
++}
++
++/// The shell's window. Lives on the main thread; only [`Waker`] crosses threads.
++pub struct Window {
++    raw: *mut WcWindow,
++}
++
++/// Wakes the event loop from another thread (egui's repaint requests from workers).
++#[derive(Clone, Copy)]
++pub struct Waker(*mut WcWindow);
++
++// SAFETY: wc_window_wake only raises an exec signal for the main task, which is safe from any
++// task; the pointer is never dereferenced on the other thread beyond that call, and the window
++// outlives every worker that holds a waker (the app, and its workers, are dropped before it).
++unsafe impl Send for Waker {}
++unsafe impl Sync for Waker {}
++
++impl Waker {
++    pub fn wake(&self) {
++        // SAFETY: see the Send impl.
++        unsafe { wc_window_wake(self.0) }
++    }
++}
++
++impl Window {
++    pub fn open(width: i32, height: i32, title: &str) -> Option<Self> {
++        let title = text_cstring(title);
++        // SAFETY: the title outlives the call (the C side copies it).
++        let raw = unsafe { wc_window_open(width, height, title.as_ptr()) };
++        if raw.is_null() { None } else { Some(Self { raw }) }
++    }
++
++    pub fn waker(&self) -> Waker {
++        Waker(self.raw)
++    }
++
++    pub fn inner_size(&self) -> (i32, i32) {
++        let (mut w, mut h) = (0, 0);
++        // SAFETY: valid window, plain out-parameters.
++        unsafe { wc_window_inner_size(self.raw, &mut w, &mut h) };
++        (w.max(1), h.max(1))
++    }
++
++    /// Sleeps until an event or a wake-up, or for `timeout_ms` (negative: no timeout).
++    pub fn wait(&self, timeout_ms: i32) -> bool {
++        // SAFETY: valid window.
++        unsafe { wc_window_wait(self.raw, timeout_ms) != 0 }
++    }
++
++    pub fn poll(&self) -> Option<WcEvent> {
++        let mut ev = WcEvent::zeroed();
++        // SAFETY: valid window and a properly laid out event record.
++        let got = unsafe { wc_window_poll(self.raw, &mut ev) };
++        (got != 0).then_some(ev)
++    }
++
++    /// Copies an RGBA frame buffer (`stride` bytes per row) into the window.
++    pub fn blit(&self, rgba: &[u8], width: usize, height: usize, stride: usize) {
++        if rgba.len() < stride * height || width == 0 || height == 0 {
++            return;
++        }
++        // SAFETY: the buffer holds `height` rows of `stride` bytes, checked above.
++        unsafe { wc_window_blit(self.raw, rgba.as_ptr(), width as i32, height as i32, stride as i32) };
++    }
++
++    pub fn set_busy(&self, busy: bool) {
++        // SAFETY: valid window.
++        unsafe { wc_window_set_busy(self.raw, busy as i32) }
++    }
++
++    pub fn set_title(&self, title: &str) {
++        let title = text_cstring(title);
++        // SAFETY: the C side copies the string before returning.
++        unsafe { wc_window_set_title(self.raw, title.as_ptr()) }
++    }
++
++    /// Shows an ASL file requester (modal) and returns the chosen paths.
++    pub fn file_request(&self, save: bool, multi: bool, title: &str, dir: &str, file: &str, pattern: &str) -> Vec<String> {
++        self.request(save, multi as i32, title, dir, file, pattern)
++    }
++
++    pub fn folder_request(&self, title: &str, dir: &str) -> Vec<String> {
++        self.request(false, 2, title, dir, "", "")
++    }
++
++    fn request(&self, save: bool, multi: i32, title: &str, dir: &str, file: &str, pattern: &str) -> Vec<String> {
++        let (title, dir, file, pattern) = (text_cstring(title), path_cstring(dir), path_cstring(file), text_cstring(pattern));
++        let mut out = vec![0u8; 16 * 1024];
++        // SAFETY: all strings are NUL-terminated and outlive the call; `out` is `outlen` bytes.
++        let n = unsafe {
++            wc_file_request(
++                self.raw,
++                save as i32,
++                multi,
++                title.as_ptr(),
++                dir.as_ptr(),
++                file.as_ptr(),
++                pattern.as_ptr(),
++                out.as_mut_ptr() as *mut c_char,
++                out.len() as i32,
++            )
++        };
++        if n <= 0 {
++            return Vec::new();
++        }
++        let end = out.iter().position(|&b| b == 0).unwrap_or(out.len());
++        out[..end].split(|&b| b == b'\n').filter(|p| !p.is_empty()).map(path_from_bytes).collect()
++    }
++}
++
++impl Drop for Window {
++    fn drop(&mut self) {
++        // SAFETY: closed exactly once.
++        unsafe { wc_window_close(self.raw) }
++    }
++}
++
++/// The system time in microseconds, the clock of [`WcEvent::time_us`].
++pub fn systime_us() -> i64 {
++    let (mut s, mut m) = (0u32, 0u32);
++    // SAFETY: two valid out-pointers.
++    unsafe { wc_systime(&mut s, &mut m) };
++    s as i64 * 1_000_000 + m as i64
++}
++
++pub fn clipboard_write_text(text: &str) -> bool {
++    let bytes = to_latin1(text);
++    // SAFETY: the buffer and its length are passed together.
++    unsafe { wc_clip_write_text(bytes.as_ptr() as *const c_char, bytes.len() as i32) != 0 }
++}
++
++pub fn clipboard_read_text() -> Option<String> {
++    let mut out = vec![0u8; 1 << 20];
++    // SAFETY: `out` is `outlen` bytes and is NUL-terminated by the C side.
++    let n = unsafe { wc_clip_read_text(out.as_mut_ptr() as *mut c_char, out.len() as i32) };
++    (n > 0).then(|| latin1(&out[..n as usize]))
++}
++
++pub fn open_url(url: &str) -> bool {
++    let url = cbytes(shell_safe_url(url).into_bytes());
++    // SAFETY: NUL-terminated string.
++    unsafe { wc_open_url(url.as_ptr()) != 0 }
++}
++
++/// `url` with every byte that the Shell would interpret inside a quoted argument (`"`, `*`),
++/// every control character and every non-ASCII byte percent-encoded. The C side quotes the URL
++/// on an `OpenURL` command line; an unescaped quote would end the argument and let the rest of
++/// the URL run as further Shell input, and the ABIv11 Shell miscounts `*"` escapes, so the
++/// characters are encoded rather than escaped.
++fn shell_safe_url(url: &str) -> String {
++    let mut out = String::with_capacity(url.len());
++    for b in url.bytes() {
++        if b.is_ascii_graphic() && b != b'"' && b != b'*' {
++            out.push(b as char);
++        } else {
++            out.push_str(&format!("%{b:02X}"));
++        }
++    }
++    out
++}
++
++/// Every task exec knows of, one "name|state|pri|sigwait|sigrecvd" line each (diagnostics).
++pub fn debug_tasks() -> String {
++    let mut out = vec![0u8; 64 * 1024];
++    // SAFETY: `out` is `outlen` bytes; the C side NUL-terminates within it.
++    let n = unsafe { wc_debug_tasks(out.as_mut_ptr() as *mut c_char, out.len() as i32) };
++    latin1(&out[..n.max(0) as usize])
++}
++
++/// The last path element of an AmigaDOS or POSIX path.
++pub fn file_part(path: &str) -> &str {
++    path.rsplit(['/', ':']).next().unwrap_or(path)
++}
++
++/// The directory part of an AmigaDOS or POSIX path (`Work:Images/` for `Work:Images/a.png`).
++pub fn dir_part(path: &str) -> &str {
++    match path.rfind(['/', ':']) {
++        Some(i) => &path[..=i],
++        None => "",
++    }
++}
++
++#[allow(dead_code)]
++pub fn c_str_to_string(p: *const c_char) -> String {
++    if p.is_null() {
++        return String::new();
++    }
++    // SAFETY: the caller passes a NUL-terminated string.
++    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn display_text_is_latin1_with_plain_punctuation() {
++        assert_eq!(to_latin1("Untitled-1 \u{2014} PdfCraft"), b"Untitled-1 - PdfCraft");
++        assert_eq!(to_latin1("caf\u{e9} \u{201c}x\u{201d}\u{2026}"), b"caf\xe9 \"x\"...");
++        assert_eq!(to_latin1("\u{4e2d}"), b"?");
++        assert_eq!(text_cstring("a\0b").as_bytes(), b"a");
++    }
++
++    #[test]
++    fn paths_pass_through_byte_for_byte() {
++        assert_eq!(path_cstring("RAM:\u{e9}t\u{e9}/a b.png").as_bytes(), "RAM:\u{e9}t\u{e9}/a b.png".as_bytes());
++        assert_eq!(path_from_bytes("Work:\u{f6}.png".as_bytes()), "Work:\u{f6}.png");
++        // An ISO 8859-1 name made outside the program: readable, though not byte-exact.
++        assert_eq!(path_from_bytes(b"Work:\xf6.png"), "Work:\u{f6}.png");
++    }
++
++    #[test]
++    fn urls_cannot_break_out_of_the_quoted_argument() {
++        assert_eq!(shell_safe_url("https://example.org/a?b=c#d"), "https://example.org/a?b=c#d");
++        assert_eq!(shell_safe_url("x\" ; Delete SYS:"), "x%22%20;%20Delete%20SYS:");
++        assert_eq!(shell_safe_url("a*b\n\u{e9}"), "a%2Ab%0A%C3%A9");
++    }
++
++    #[test]
++    fn amigados_path_parts() {
++        assert_eq!(file_part("Work:Images/a.png"), "a.png");
++        assert_eq!(dir_part("Work:Images/a.png"), "Work:Images/");
++        assert_eq!(dir_part("RAM:a.png"), "RAM:");
++        assert_eq!(dir_part("a.png"), "");
++    }
++}
+diff --git a/apps/pdfcraft-aros/src/input.rs b/apps/pdfcraft-aros/src/input.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..02a462b97a885efb7163be84292db0dab161c648
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/input.rs
+@@ -0,0 +1,170 @@
++//! Translates the window's events (`ffi::WcEvent`) into egui input, the way egui-winit does for
++//! winit: pointer moves and buttons, the wheel, keys with their modifiers, typed text, and the
++//! clipboard shortcuts as `Copy` / `Cut` / `Paste` events.
++
++use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
++
++use crate::ffi::{self, WcEvent};
++
++/// What one frame's worth of window events amounts to.
++#[derive(Default)]
++pub struct Input {
++    pub events: Vec<Event>,
++    pub modifiers: Modifiers,
++    pub pointer: Option<Pos2>,
++    /// A new inner size arrived (pixels).
++    pub resized: Option<(i32, i32)>,
++    pub close_requested: bool,
++    pub focus: Option<bool>,
++    /// Clipboard text asked for by the app (`ViewportCommand::RequestPaste`), delivered next frame.
++    pub paste_pending: bool,
++}
++
++impl Input {
++    pub fn modifiers_from(qualifier: u32) -> Modifiers {
++        let ctrl = qualifier & (ffi::Q_CONTROL | ffi::Q_LCOMMAND | ffi::Q_RCOMMAND) != 0;
++        Modifiers {
++            alt: qualifier & (ffi::Q_LALT | ffi::Q_RALT) != 0,
++            ctrl,
++            shift: qualifier & (ffi::Q_LSHIFT | ffi::Q_RSHIFT) != 0,
++            mac_cmd: false,
++            command: ctrl,
++        }
++    }
++
++    /// Folds one window event in, in points (`ppp` pixels per point).
++    pub fn push(&mut self, ev: &WcEvent, ppp: f32) {
++        let mods = Self::modifiers_from(ev.qualifier);
++        if mods != self.modifiers {
++            self.modifiers = mods;
++            self.events.push(Event::ModifiersChanged(mods));
++        }
++        let pos = pos2(ev.x as f32 / ppp, ev.y as f32 / ppp);
++        match ev.kind {
++            ffi::EV_CLOSE => self.close_requested = true,
++            ffi::EV_RESIZE => self.resized = Some((ev.width, ev.height)),
++            ffi::EV_FOCUS => {
++                let focused = ev.focus != 0;
++                self.focus = Some(focused);
++                self.events.push(Event::WindowFocused(focused));
++                if !focused {
++                    self.events.push(Event::PointerGone);
++                    self.pointer = None;
++                }
++            }
++            ffi::EV_MOUSE_MOVE => {
++                self.pointer = Some(pos);
++                self.events.push(Event::PointerMoved(pos));
++            }
++            ffi::EV_BUTTON => {
++                let button = match ev.button {
++                    0 => PointerButton::Primary,
++                    1 => PointerButton::Secondary,
++                    _ => PointerButton::Middle,
++                };
++                self.pointer = Some(pos);
++                self.events.push(Event::PointerButton { pos, button, pressed: ev.down != 0, modifiers: mods });
++            }
++            ffi::EV_WHEEL => {
++                self.events.push(Event::MouseWheel {
++                    unit: MouseWheelUnit::Line,
++                    delta: vec2(ev.wheel_x as f32, ev.wheel_y as f32),
++                    phase: TouchPhase::Move,
++                    modifiers: mods,
++                });
++            }
++            ffi::EV_KEY => self.key(ev, mods),
++            _ => {}
++        }
++    }
++
++    fn key(&mut self, ev: &WcEvent, mods: Modifiers) {
++        let pressed = ev.down != 0;
++        let repeat = ev.qualifier & ffi::Q_REPEAT != 0;
++        let plain = ev.plain();
++        let key = key_for(ev.rawkey, &plain);
++        // The clipboard shortcuts become egui's clipboard events (as egui-winit does), with the
++        // text read here for Paste; the app's raw input hook knows how to give them back as key
++        // presses outside text fields.
++        if pressed && mods.command && !mods.alt && !mods.shift {
++            match key {
++                Some(Key::C) => {
++                    self.events.push(Event::Copy);
++                    return;
++                }
++                Some(Key::X) => {
++                    self.events.push(Event::Cut);
++                    return;
++                }
++                Some(Key::V) => {
++                    self.events.push(Event::Paste(ffi::clipboard_read_text().unwrap_or_default()));
++                    return;
++                }
++                _ => {}
++            }
++        }
++        if let Some(key) = key {
++            self.events.push(Event::Key { key, physical_key: None, pressed, repeat, modifiers: mods });
++        }
++        // Keys without a character (Home, End, the cursor and function keys) map to a CSI
++        // sequence: "\u{9b}44~" for Home. Only the CSI itself is a control character, so
++        // filtering would leave "44~" to be typed into the document.
++        if pressed && !mods.ctrl && !mods.command && !ev.text().starts_with('\u{9b}') {
++            let text: String = ev.text().chars().filter(|c| !c.is_control()).collect();
++            if !text.is_empty() {
++                self.events.push(Event::Text(text));
++            }
++        }
++    }
++
++    /// Takes the frame's events, leaving the persistent state (modifiers, pointer).
++    pub fn take_events(&mut self) -> Vec<Event> {
++        std::mem::take(&mut self.events)
++    }
++}
++
++/// The logical key for a raw key code: the special keys by code (they are the same on every
++/// keymap), the others from the character the keymap gives the unshifted key.
++fn key_for(rawkey: i32, plain: &str) -> Option<Key> {
++    let special = match rawkey {
++        0x41 => Some(Key::Backspace),
++        0x42 => Some(Key::Tab),
++        0x43 => Some(Key::Enter), // keypad Enter
++        0x44 => Some(Key::Enter),
++        0x45 => Some(Key::Escape),
++        0x46 => Some(Key::Delete),
++        0x47 => Some(Key::Insert),
++        0x48 => Some(Key::PageUp),
++        0x49 => Some(Key::PageDown),
++        0x4c => Some(Key::ArrowUp),
++        0x4d => Some(Key::ArrowDown),
++        0x4e => Some(Key::ArrowRight),
++        0x4f => Some(Key::ArrowLeft),
++        0x50 => Some(Key::F1),
++        0x51 => Some(Key::F2),
++        0x52 => Some(Key::F3),
++        0x53 => Some(Key::F4),
++        0x54 => Some(Key::F5),
++        0x55 => Some(Key::F6),
++        0x56 => Some(Key::F7),
++        0x57 => Some(Key::F8),
++        0x58 => Some(Key::F9),
++        0x59 => Some(Key::F10),
++        0x4b => Some(Key::F11),
++        0x6f => Some(Key::F12),
++        0x5f => Some(Key::Insert), // Help
++        0x70 => Some(Key::Home),
++        0x71 => Some(Key::End),
++        0x40 => Some(Key::Space),
++        _ => None,
++    };
++    if special.is_some() {
++        return special;
++    }
++    let c = plain.chars().next()?;
++    if c.is_control() || c == ' ' {
++        return None;
++    }
++    let name: String = c.to_uppercase().collect();
++    Key::from_name(&name)
++}
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..410fe30289d2a9f91875f66b70251ca58602cdc0
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -0,0 +1,468 @@
++//! PdfCraft on AROS.
++//!
++//! Usage: `PdfCraft [--window <w>x<h>] [--screenshot <file.png> [--screenshot-frames <n>]] [files…]`
++//!
++//! The egui interface (`pdfcraft-ui-egui`) is driven directly: an Intuition window
++//! (`c/aros_shell.c`, `ffi`) delivers input, the tessellated frame is rasterized in software
++//! (`raster`) and blitted into the window. The engine, documents and file formats are the same
++//! as on the other platforms. The window, input and rasterizer come from the PhotoCraft AROS
++//! port's shell; this file and `services` follow the desktop app (apps/pdfcraft/src/main.rs).
++//!
++//! `--screenshot <file>` writes the window's pixels after `--screenshot-frames` frames (20 by
++//! default) and quits: a way to look at the interface where no display can be watched.
++//! `--window` sets the inner size; `PDFCRAFT_PERF=<file>` records the loop's timings (`perf`).
++#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
++
++mod ffi;
++mod input;
++mod perf;
++mod raster;
++mod services;
++
++use std::cell::RefCell;
++use std::rc::Rc;
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
++
++use egui::{OutputCommand, Rect, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2};
++use pdfcraft_ui_egui::PdfCraftApp;
++
++/// Frames between polls when nothing asks for a repaint: background PDF work and
++/// autosave still get their turn.
++const IDLE_POLL: Duration = Duration::from_millis(500);
++
++struct Logger;
++
++impl log::Log for Logger {
++    fn enabled(&self, metadata: &log::Metadata) -> bool {
++        metadata.level() <= log::max_level()
++    }
++
++    fn log(&self, record: &log::Record) {
++        if self.enabled(record.metadata()) {
++            log_line(&format!("pdfcraft: {} {}: {}", record.level(), record.target(), record.args()));
++        }
++    }
++
++    fn flush(&self) {}
++}
++
++static LOGGER: Logger = Logger;
++
++/// `PDFCRAFT_LOG`: a file the log (and a panic's message) is appended to instead of the
++/// console. A program started from Workbench has no console, and the AROS Shell cannot redirect
++/// a command's error output, so without it nothing of a failure can be read afterwards.
++static LOG_FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
++
++fn log_line(line: &str) {
++    use std::io::Write;
++    let file = LOG_FILE.get_or_init(|| {
++        let path = std::env::var_os("PDFCRAFT_LOG").filter(|p| !p.is_empty())?;
++        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
++    });
++    match file {
++        Some(file) => {
++            let mut file = file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++            let _ = writeln!(file, "{line}");
++            let _ = file.flush();
++        }
++        None => eprintln!("{line}"),
++    }
++}
++
++fn install_logger() {
++    let level = match std::env::var("RUST_LOG").ok().as_deref().map(str::trim) {
++        Some("trace") => log::LevelFilter::Trace,
++        Some("debug") => log::LevelFilter::Debug,
++        Some("info") => log::LevelFilter::Info,
++        Some("error") => log::LevelFilter::Error,
++        Some("off") => log::LevelFilter::Off,
++        _ => log::LevelFilter::Warn,
++    };
++    // Log every panic before the default hook prints it, so it also reaches the PDFCRAFT_LOG file.
++    let default_hook = std::panic::take_hook();
++    std::panic::set_hook(Box::new(move |info| {
++        log::error!("PdfCraft internal error: {info}");
++        default_hook(info);
++    }));
++    if log::set_logger(&LOGGER).is_ok() {
++        log::set_max_level(level);
++    }
++}
++
++struct Options {
++    files: Vec<String>,
++    window: Option<(i32, i32)>,
++    screenshot: Option<String>,
++    screenshot_frames: u64,
++}
++
++fn parse_args() -> Result<Option<Options>, String> {
++    let mut o = Options { files: Vec::new(), window: None, screenshot: None, screenshot_frames: 20 };
++    let mut args = std::env::args_os().skip(1);
++    while let Some(a) = args.next() {
++        match a.to_str() {
++            Some("--help") | Some("-h") => {
++                println!("PdfCraft [--window <w>x<h>] [--screenshot <file.png> [--screenshot-frames <n>]] [files...]");
++                return Ok(None);
++            }
++            Some("--version") => {
++                println!("pdfcraft {}", env!("CARGO_PKG_VERSION"));
++                return Ok(None);
++            }
++            Some("--window") => {
++                let v = args.next().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
++                let size = v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
++                o.window = Some(size.ok_or_else(|| format!("--window: `{v}` is not <width>x<height>"))?);
++            }
++            Some("--screenshot") => o.screenshot = args.next().map(|p| p.to_string_lossy().into_owned()),
++            Some("--screenshot-frames") => {
++                let v = args.next().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
++                o.screenshot_frames = v.parse().map_err(|_| format!("--screenshot-frames: `{v}` is not a number"))?;
++            }
++            Some(s) => o.files.push(s.to_owned()),
++            None => return Err(format!("argument is not valid text: {}", a.to_string_lossy())),
++        }
++    }
++    Ok(Some(o))
++}
++
++fn prefs_enabled() -> bool {
++    std::env::var_os("PDFCRAFT_NO_PREFS").is_none()
++}
++
++fn prefs_path() -> std::path::PathBuf {
++    std::env::var_os("PDFCRAFT_PREFS").map(std::path::PathBuf::from).unwrap_or_else(|| "ENVARC:PdfCraft/ui.json".into())
++}
++fn load_prefs(app: &mut PdfCraftApp) {
++    if !prefs_enabled() {
++        return;
++    }
++    let path = prefs_path();
++    if std::fs::metadata(&path).is_ok_and(|m| m.len() <= 2 * 1024 * 1024) {
++        if let Ok(text) = std::fs::read_to_string(path) {
++            app.restore(&text);
++        }
++    }
++}
++fn save_prefs(app: &PdfCraftApp) {
++    if !prefs_enabled() {
++        return;
++    }
++    let path = prefs_path();
++    if let Some(parent) = path.parent() {
++        let _ = std::fs::create_dir_all(parent);
++    }
++    if let Err(error) =
++        pdfcraft_platform::staging::write_atomically(&path, app.persist().as_bytes(), pdfcraft_platform::staging::StagingName::TagThenSuffix)
++    {
++        log::warn!("preferences: {error}");
++    }
++}
++fn main() {
++    let requesters = pdfcraft_aros_runtime::suppress_requesters();
++    install_logger();
++    // GUI work must not rely on the launching Shell/Workbench stack size.
++    let worker = std::thread::Builder::new().name("pdfcraft-ui".into()).stack_size(4 * 1024 * 1024).spawn(gui_main);
++    let code = match worker {
++        Ok(worker) => worker.join().unwrap_or_else(|_| {
++            log::error!("GUI worker panicked");
++            1
++        }),
++        Err(error) => {
++            log::error!("cannot start GUI worker: {error}");
++            1
++        }
++    };
++    rayon_core::terminate_global_thread_pool();
++    if log::log_enabled!(log::Level::Debug) {
++        log::debug!("tasks before exit: {}", ffi::debug_tasks());
++    }
++    drop(requesters);
++    std::process::exit(code);
++}
++fn gui_main() -> i32 {
++    let options = match parse_args() {
++        Ok(Some(options)) => options,
++        Ok(None) => return 0,
++        Err(error) => {
++            eprintln!("pdfcraft: {error}");
++            return 2;
++        }
++    };
++    let (sw, sh) = ffi::screen_size();
++    let (w, h) = options.window.unwrap_or((1008.min(sw - 16).max(640), 720.min(sh - 48).max(480)));
++    let Some(window) = ffi::Window::open(w, h, "PdfCraft") else {
++        return 1;
++    };
++    let window = Rc::new(window);
++    let shared: services::SharedWindow = Rc::new(RefCell::new(Some(window.clone())));
++    services::install(shared.clone());
++    let code = run(&window, shared.clone(), options);
++    *shared.borrow_mut() = None;
++    drop(window);
++    code
++}
++
++/// Repaint requests from egui (any thread): the earliest deadline, and the window's wake-up.
++struct Repaint {
++    waker: ffi::Waker,
++    due: Mutex<Option<Instant>>,
++}
++
++fn new_app(_window: services::SharedWindow, options: &Options) -> PdfCraftApp {
++    let mut app = PdfCraftApp::new();
++    load_prefs(&mut app);
++    app.integrated_titlebar = false;
++    app.system_title_bar = true;
++    for path in &options.files {
++        app.open_path(path);
++    }
++    app
++}
++
++fn run(window: &Rc<ffi::Window>, shared_window: services::SharedWindow, options: Options) -> i32 {
++    let ctx = egui::Context::default();
++    let repaint = Arc::new(Repaint { waker: window.waker(), due: Mutex::new(Some(Instant::now())) });
++    {
++        let repaint = repaint.clone();
++        let ui_thread = std::thread::current().id();
++        ctx.set_request_repaint_callback(move |info| {
++            let due = Instant::now() + info.delay;
++            let mut slot = repaint.due.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++            *slot = Some(slot.map_or(due, |d| d.min(due)));
++            drop(slot);
++            // Only another thread has to wake the loop. A request made on the UI thread comes
++            // during a frame (the caret's next blink, a tooltip's delay), and the loop reads
++            // `due` before it sleeps; waking it as well ended every sleep at once, so a
++            // requested delay never happened.
++            if std::thread::current().id() != ui_thread {
++                repaint.waker.wake();
++            }
++        });
++    }
++    let mut app = new_app(shared_window, &options);
++
++    let ppp = 1.0f32;
++    let (mut width, mut height) = window.inner_size();
++    let mut renderer = raster::Renderer::new(width as usize, height as usize);
++    let mut input = input::Input::default();
++    let start = Instant::now();
++    let mut frame: u64 = 0;
++    let mut focused = true;
++    let mut busy = false;
++    let mut title = String::from("PdfCraft");
++    let (sw, sh) = ffi::screen_size();
++    let mut perf = perf::Perf::from_env();
++    renderer.measure = perf.is_some();
++
++    loop {
++        let mut rec = perf::Frame::default();
++        let loop_start = Instant::now();
++        // Sleep until something happens or the next repaint is due.
++        let due = repaint.due.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
++        let timeout = match due {
++            Some(t) => t.saturating_duration_since(Instant::now()).min(IDLE_POLL),
++            None => IDLE_POLL,
++        };
++        rec.late_us = due.map_or(-1, |t| loop_start.saturating_duration_since(t).as_micros() as i64);
++        rec.wait_timeout_ms = timeout.as_millis() as i32;
++        rec.woke_by_event = window.wait(timeout.as_millis() as i32) as u8;
++        let woke = Instant::now();
++        rec.wait_us = perf::us(woke - loop_start);
++        let (mut oldest, mut newest) = (i64::MAX, i64::MIN);
++        while let Some(ev) = window.poll() {
++            if perf.is_some() {
++                // F9: the measurement's scenario marker, kept from the app.
++                if ev.kind == ffi::EV_KEY && ev.rawkey == 0x58 {
++                    if ev.down != 0
++                        && let Some(p) = perf.as_mut()
++                    {
++                        p.segment += 1;
++                    }
++                    continue;
++                }
++                rec.events += 1;
++                match ev.kind {
++                    ffi::EV_MOUSE_MOVE => rec.moves += 1,
++                    ffi::EV_KEY => rec.keys += 1,
++                    ffi::EV_WHEEL => rec.wheels += 1,
++                    ffi::EV_BUTTON => rec.buttons += 1,
++                    _ => {}
++                }
++                oldest = oldest.min(ev.time_us());
++                newest = newest.max(ev.time_us());
++            }
++            input.push(&ev, ppp);
++        }
++        if let Some((nw, nh)) = input.resized.take() {
++            width = nw.max(1);
++            height = nh.max(1);
++            renderer.resize(width as usize, height as usize);
++        }
++        if let Some(f) = input.focus.take() {
++            focused = f;
++        }
++        let close_requested = std::mem::take(&mut input.close_requested);
++
++        // This frame's input.
++        let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(width as f32 / ppp, height as f32 / ppp));
++        let mut raw = egui::RawInput {
++            screen_rect: Some(screen_rect),
++            max_texture_side: Some(16384),
++            time: Some(start.elapsed().as_secs_f64()),
++            predicted_dt: 1.0 / 60.0,
++            events: input.take_events(),
++            focused,
++            ..Default::default()
++        };
++        if std::mem::take(&mut input.paste_pending) {
++            raw.events.push(egui::Event::Paste(ffi::clipboard_read_text().unwrap_or_default()));
++        }
++        {
++            let info = raw.viewports.entry(ViewportId::ROOT).or_default();
++            info.native_pixels_per_point = Some(ppp);
++            info.monitor_size = Some(vec2(sw as f32 / ppp, sh as f32 / ppp));
++            info.inner_rect = Some(screen_rect);
++            info.outer_rect = Some(screen_rect);
++            info.focused = Some(focused);
++            info.title = Some(title.clone());
++            if close_requested {
++                info.events.push(ViewportEvent::Close);
++            }
++        }
++        app.raw_input_hook(&ctx, &mut raw);
++        let (renders_before, render_ns_before) = (0u64, 0u64);
++        let input_done = Instant::now();
++        rec.input_us = perf::us(input_done - woke);
++
++        // The frame, as the desktop app's eframe `logic` and `ui`.
++        let mut logic_done = input_done;
++        let out = ctx.run_ui(raw, |ui| {
++            app.logic(ui.ctx());
++            logic_done = Instant::now();
++            app.ui(ui);
++        });
++        let ui_done = Instant::now();
++        if let Some(p) = perf.as_mut() {
++            p.causes(ctx.repaint_causes().iter().map(|c| format!("{}:{} {}", c.file, c.line, c.reason)));
++        }
++        rec.logic_us = perf::us(logic_done - input_done);
++        rec.ui_us = perf::us(ui_done - logic_done);
++        let (renders_after, render_ns_after) = (0u64, 0u64);
++        rec.page_renders = (renders_after - renders_before) as u32;
++        rec.page_render_us = ((render_ns_after - render_ns_before) / 1000).min(u32::MAX as u64) as u32;
++        frame += 1;
++
++        // What the frame asked of the platform.
++        for cmd in &out.platform_output.commands {
++            match cmd {
++                OutputCommand::CopyText(text) => {
++                    if !ffi::clipboard_write_text(text) {
++                        log::warn!("could not write the clipboard");
++                    }
++                }
++                OutputCommand::CopyImage(_) => log::info!("copying images to the clipboard is not supported on AROS"),
++                OutputCommand::OpenUrl(url) => {
++                    if !ffi::open_url(&url.url) {
++                        log::warn!("could not open {}", url.url);
++                    }
++                }
++            }
++        }
++        let wants_busy = out.platform_output.cursor_icon == egui::CursorIcon::Wait;
++        if wants_busy != busy {
++            busy = wants_busy;
++            window.set_busy(busy);
++        }
++        // The close gadget asks the app first: with unsaved changes it shows "Save changes?" and
++        // sets `quit_requested` once that is answered.
++        let mut closing = close_requested;
++        if let Some(vo) = out.viewport_output.get(&ViewportId::ROOT) {
++            for cmd in &vo.commands {
++                match cmd {
++                    ViewportCommand::Close => closing = true,
++                    ViewportCommand::CancelClose => closing = false,
++                    ViewportCommand::Title(t) => {
++                        if *t != title {
++                            title = t.clone();
++                            window.set_title(&title);
++                        }
++                    }
++                    ViewportCommand::RequestPaste => input.paste_pending = true,
++                    _ => {}
++                }
++            }
++            // The next repaint: at once, after a delay, or when input arrives.
++            let delay = vo.repaint_delay;
++            rec.next_delay_ms = if delay < Duration::from_secs(3600) { delay.as_millis() as i64 } else { -1 };
++            if delay < Duration::from_secs(3600) {
++                let due = Instant::now() + delay;
++                let mut slot = repaint.due.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++                *slot = Some(slot.map_or(due, |d| d.min(due)));
++            }
++        }
++
++        // Paint and show.
++        let paint_start = Instant::now();
++        let primitives = ctx.tessellate(out.shapes, out.pixels_per_point);
++        let tessellated = Instant::now();
++        renderer.update_textures(&out.textures_delta);
++        let uploaded = Instant::now();
++        renderer.clear([0xf3, 0xf3, 0xf3]);
++        renderer.paint(&primitives, out.pixels_per_point);
++        renderer.free_textures(&out.textures_delta);
++        let rasterized = Instant::now();
++        window.blit(&renderer.frame, renderer.width, renderer.height, renderer.stride());
++        let blitted = Instant::now();
++        if let Some(p) = perf.as_mut() {
++            let shown = ffi::systime_us();
++            rec.segment = p.segment;
++            rec.at_us = start.elapsed().as_micros() as u64;
++            rec.tess_us = perf::us(tessellated - paint_start);
++            rec.textures_us = perf::us(uploaded - tessellated);
++            rec.raster_us = perf::us(rasterized - uploaded);
++            rec.blit_us = perf::us(blitted - rasterized);
++            (rec.latency_min_us, rec.latency_max_us) = if rec.events > 0 { (shown - newest, shown - oldest) } else { (-1, -1) };
++            rec.texture_px = out.textures_delta.set.iter().flat_map(|(_, ds)| ds.iter()).map(|d| (d.image.width() * d.image.height()) as u64).sum();
++            rec.paint = renderer.stats;
++            rec.vertices = primitives
++                .iter()
++                .map(|p| match &p.primitive {
++                    egui::epaint::Primitive::Mesh(m) => m.vertices.len() as u32,
++                    egui::epaint::Primitive::Callback(_) => 0,
++                })
++                .sum();
++            (rec.width, rec.height) = (width as u16, height as u16);
++            p.push(rec);
++        }
++
++        if let Some(path) = options.screenshot.as_deref()
++            && frame >= options.screenshot_frames
++        {
++            if let Some(p) = &perf {
++                p.write();
++            }
++            match write_png(path, &renderer) {
++                Ok(()) => eprintln!("pdfcraft: wrote {path}"),
++                Err(e) => eprintln!("pdfcraft: screenshot {path}: {e}"),
++            }
++            return 0;
++        }
++        if closing {
++            log::info!("closing: event loop finished after {frame} frames");
++            save_prefs(&app);
++            if let Some(p) = &perf {
++                p.write();
++            }
++            drop(app);
++            log::info!("closing: application state dropped");
++            return 0;
++        }
++    }
++}
++
++fn write_png(path: &str, r: &raster::Renderer) -> Result<(), String> {
++    let img = image::RgbaImage::from_raw(r.width as u32, r.height as u32, r.frame.clone()).ok_or("frame size mismatch")?;
++    img.save_with_format(path, image::ImageFormat::Png).map_err(|e| e.to_string())
++}
+diff --git a/apps/pdfcraft-aros/src/perf.rs b/apps/pdfcraft-aros/src/perf.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a224b0e7839c8cfea43a714a6e6bfdfc9d7fab82
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/perf.rs
+@@ -0,0 +1,148 @@
++//! Responsiveness measurement: one record per pass of the event loop, kept in memory and written
++//! once, at exit, to the file named by `PDFCRAFT_PERF` (CSV). Nothing is logged while the
++//! program runs, so the measurement does not slow what it measures.
++//!
++//! Times are microseconds. `wait` is the time asleep in `Window::wait`; the phases after it are
++//! the frame's work. An event's latency runs from Intuition's stamp on its message to the end of
++//! the blit of the frame that handled it, both in the system time of `ffi::systime_us`. F9 is
++//! taken by the shell as a scenario marker and not passed on; each press starts the next segment.
++
++use std::collections::BTreeMap;
++use std::io::Write;
++
++use crate::raster::PaintStats;
++
++#[derive(Clone, Copy, Default)]
++pub struct Frame {
++    pub segment: u32,
++    /// Since the program started (`Instant`).
++    pub at_us: u64,
++    pub wait_us: u32,
++    pub input_us: u32,
++    pub logic_us: u32,
++    pub ui_us: u32,
++    pub tess_us: u32,
++    pub textures_us: u32,
++    pub raster_us: u32,
++    pub blit_us: u32,
++    pub events: u16,
++    pub moves: u16,
++    pub keys: u16,
++    pub wheels: u16,
++    pub buttons: u16,
++    /// Youngest and oldest event of the frame, age at the end of its blit; -1 without events.
++    pub latency_min_us: i64,
++    pub latency_max_us: i64,
++    pub page_renders: u32,
++    pub page_render_us: u32,
++    /// Pixels of texture data uploaded this frame (page images, the font atlas).
++    pub texture_px: u64,
++    pub vertices: u32,
++    pub width: u16,
++    pub height: u16,
++    /// The timeout the loop slept with (ms; 1 when a repaint was already due) and whether a
++    /// window message or a wake-up ended the sleep (1) rather than the timeout (0).
++    pub wait_timeout_ms: i32,
++    pub woke_by_event: u8,
++    /// How far past its due time the repaint was when the loop started this pass; -1: none due.
++    pub late_us: i64,
++    /// The delay egui asked for before the next pass, at the end of this one (ms); -1: none.
++    pub next_delay_ms: i64,
++    pub paint: PaintStats,
++}
++
++pub struct Perf {
++    path: std::path::PathBuf,
++    frames: Vec<Frame>,
++    pub segment: u32,
++    /// (segment, "file:line reason") -> frames run for that cause.
++    causes: BTreeMap<(u32, String), u32>,
++}
++
++/// Records beyond this are dropped (about an hour at a few frames a second).
++const MAX_FRAMES: usize = 50_000;
++
++impl Perf {
++    pub fn from_env() -> Option<Perf> {
++        let path = std::env::var_os("PDFCRAFT_PERF").filter(|p| !p.is_empty())?;
++        Some(Perf { path: path.into(), frames: Vec::with_capacity(MAX_FRAMES), segment: 0, causes: BTreeMap::new() })
++    }
++
++    pub fn push(&mut self, frame: Frame) {
++        if self.frames.len() < MAX_FRAMES {
++            self.frames.push(frame);
++        }
++    }
++
++    /// Counts the reasons egui recorded for this pass's repaint.
++    pub fn causes(&mut self, causes: impl IntoIterator<Item = String>) {
++        for c in causes {
++            *self.causes.entry((self.segment, c)).or_default() += 1;
++        }
++    }
++
++    pub fn write(&self) {
++        let result = (|| -> std::io::Result<()> {
++            let mut f = std::io::BufWriter::new(std::fs::File::create(&self.path)?);
++            writeln!(
++                f,
++                "segment,at_us,wait_us,input_us,logic_us,ui_us,tess_us,textures_us,raster_us,blit_us,events,moves,keys,wheels,buttons,latency_min_us,latency_max_us,page_renders,page_render_us,texture_px,vertices,width,height,wait_timeout_ms,woke_by_event,late_us,next_delay_ms,clear_us,runs{}",
++                ["page", "solid", "atlas"]
++                    .iter()
++                    .flat_map(
++                        |k| ["triangles", "visited", "covered", "bilinear", "nearest", "blended", "opaque", "us"].map(move |f| format!(",{k}_{f}"))
++                    )
++                    .collect::<String>()
++            )?;
++            for r in &self.frames {
++                write!(
++                    f,
++                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
++                    r.segment,
++                    r.at_us,
++                    r.wait_us,
++                    r.input_us,
++                    r.logic_us,
++                    r.ui_us,
++                    r.tess_us,
++                    r.textures_us,
++                    r.raster_us,
++                    r.blit_us,
++                    r.events,
++                    r.moves,
++                    r.keys,
++                    r.wheels,
++                    r.buttons,
++                    r.latency_min_us,
++                    r.latency_max_us,
++                    r.page_renders,
++                    r.page_render_us,
++                    r.texture_px,
++                    r.vertices,
++                    r.width,
++                    r.height
++                )?;
++                write!(f, ",{},{},{},{},{},{}", r.wait_timeout_ms, r.woke_by_event, r.late_us, r.next_delay_ms, r.paint.clear_us, r.paint.runs)?;
++                for k in &r.paint.kinds {
++                    write!(f, ",{},{},{},{},{},{},{},{}", k.triangles, k.visited, k.covered, k.bilinear, k.nearest, k.blended, k.opaque, k.us)?;
++                }
++                writeln!(f)?;
++            }
++            f.flush()?;
++            let mut c = std::io::BufWriter::new(std::fs::File::create(self.path.with_extension("causes.csv"))?);
++            writeln!(c, "segment,frames,cause")?;
++            for ((segment, cause), n) in &self.causes {
++                writeln!(c, "{segment},{n},\"{}\"", cause.replace('"', "'"))?;
++            }
++            c.flush()
++        })();
++        if let Err(e) = result {
++            log::warn!("cannot write {}: {e}", self.path.display());
++        }
++    }
++}
++
++/// Microseconds of `d`, saturating.
++pub fn us(d: std::time::Duration) -> u32 {
++    d.as_micros().min(u32::MAX as u128) as u32
++}
+diff --git a/apps/pdfcraft-aros/src/raster.rs b/apps/pdfcraft-aros/src/raster.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ae10db5b10cdac7ac300b132185a759681c54c5
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/raster.rs
+@@ -0,0 +1,443 @@
++//! A software renderer for egui's tessellated output: textured, vertex-coloured triangles with
++//! premultiplied alpha, drawn into an RGBA frame buffer that the window blits. No GPU is needed
++//! (AROS has no wgpu backend), and egui's own feathering does the anti-aliasing.
++
++use std::collections::HashMap;
++
++use egui::epaint::textures::{TextureFilter, TexturesDelta};
++use egui::epaint::{ClippedPrimitive, ImageData, ImageDelta, Primitive, TextureId, Vertex};
++
++struct Texture {
++    width: usize,
++    height: usize,
++    /// Premultiplied sRGBA, row by row.
++    pixels: Vec<[u8; 4]>,
++    linear: bool,
++}
++
++impl Texture {
++    #[inline]
++    fn texel(&self, x: i32, y: i32) -> [u8; 4] {
++        let x = x.clamp(0, self.width as i32 - 1) as usize;
++        let y = y.clamp(0, self.height as i32 - 1) as usize;
++        self.pixels.get(y * self.width + x).copied().unwrap_or([0; 4])
++    }
++
++    /// Samples at normalized `(u, v)`: bilinear for textures asking for it, else nearest.
++    #[inline]
++    fn sample(&self, u: f32, v: f32) -> [f32; 4] {
++        let fx = u * self.width as f32 - 0.5;
++        let fy = v * self.height as f32 - 0.5;
++        if !self.linear {
++            let t = self.texel((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32);
++            return [t[0] as f32, t[1] as f32, t[2] as f32, t[3] as f32];
++        }
++        let x0 = fx.floor();
++        let y0 = fy.floor();
++        let tx = fx - x0;
++        let ty = fy - y0;
++        let (x0, y0) = (x0 as i32, y0 as i32);
++        let a = self.texel(x0, y0);
++        let b = self.texel(x0 + 1, y0);
++        let c = self.texel(x0, y0 + 1);
++        let d = self.texel(x0 + 1, y0 + 1);
++        let mut out = [0.0f32; 4];
++        for i in 0..4 {
++            let top = a[i] as f32 * (1.0 - tx) + b[i] as f32 * tx;
++            let bottom = c[i] as f32 * (1.0 - tx) + d[i] as f32 * tx;
++            out[i] = top * (1.0 - ty) + bottom * ty;
++        }
++        out
++    }
++}
++
++/// What `paint` did, by kind of triangle (see [`Kind`]), for the PDFCRAFT_PERF measurement.
++#[derive(Clone, Copy, Default)]
++pub struct KindStats {
++    pub triangles: u32,
++    /// Pixels of the triangles' clipped bounding boxes: every one is tested.
++    pub visited: u64,
++    /// Pixels inside a triangle.
++    pub covered: u64,
++    pub bilinear: u64,
++    pub nearest: u64,
++    /// Covered pixels written as a blend (alpha below 255) and as an opaque copy.
++    pub blended: u64,
++    pub opaque: u64,
++    /// Time in runs of consecutive triangles of this kind (two clock reads per run).
++    pub us: u64,
++}
++
++/// Triangles by what they draw: a user texture (page images, previews), a solid colour (egui's
++/// fills sample the font atlas's white texel: all three UVs equal), or the atlas itself (text).
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub enum Kind {
++    Page = 0,
++    Solid = 1,
++    Atlas = 2,
++}
++
++#[derive(Clone, Copy, Default)]
++pub struct PaintStats {
++    pub kinds: [KindStats; 3],
++    pub clear_us: u64,
++    pub runs: u32,
++}
++
++pub struct Renderer {
++    textures: HashMap<TextureId, Texture>,
++    /// Counters of the last `clear` + `paint`; filled only when `measure` is set.
++    pub stats: PaintStats,
++    pub measure: bool,
++    /// RGBA, `width * height * 4` bytes, opaque after `clear`.
++    pub frame: Vec<u8>,
++    pub width: usize,
++    pub height: usize,
++}
++
++impl Renderer {
++    pub fn new(width: usize, height: usize) -> Self {
++        let mut r = Self { textures: HashMap::new(), stats: PaintStats::default(), measure: false, frame: Vec::new(), width: 0, height: 0 };
++        r.resize(width, height);
++        r
++    }
++
++    pub fn resize(&mut self, width: usize, height: usize) {
++        let (width, height) = (width.max(1), height.max(1));
++        if (width, height) != (self.width, self.height) {
++            self.width = width;
++            self.height = height;
++            self.frame = vec![0; width * height * 4];
++        }
++    }
++
++    pub fn stride(&self) -> usize {
++        self.width * 4
++    }
++
++    pub fn clear(&mut self, rgb: [u8; 3]) {
++        let started = self.measure.then(std::time::Instant::now);
++        for px in self.frame.chunks_exact_mut(4) {
++            px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
++        }
++        self.stats = PaintStats::default();
++        if let Some(t) = started {
++            self.stats.clear_us = t.elapsed().as_micros() as u64;
++        }
++    }
++
++    /// Applies the frame's texture uploads (before painting).
++    pub fn update_textures(&mut self, delta: &TexturesDelta) {
++        for (id, deltas) in &delta.set {
++            for d in deltas {
++                self.set_texture(*id, d);
++            }
++        }
++    }
++
++    /// Frees the frame's released textures (after painting).
++    pub fn free_textures(&mut self, delta: &TexturesDelta) {
++        for id in &delta.free {
++            self.textures.remove(id);
++        }
++    }
++
++    fn set_texture(&mut self, id: TextureId, delta: &ImageDelta) {
++        let ImageData::Color(image) = &delta.image;
++        let [w, h] = image.size;
++        let linear = delta.options.magnification == TextureFilter::Linear;
++        match delta.pos {
++            None => {
++                self.textures.insert(id, Texture { width: w, height: h, pixels: image.pixels.iter().map(|c| c.to_array()).collect(), linear });
++            }
++            Some([x, y]) => {
++                let Some(t) = self.textures.get_mut(&id) else { return };
++                for row in 0..h {
++                    let ty = y + row;
++                    if ty >= t.height {
++                        break;
++                    }
++                    for col in 0..w {
++                        let tx = x + col;
++                        if tx >= t.width {
++                            break;
++                        }
++                        if let (Some(dst), Some(src)) = (t.pixels.get_mut(ty * t.width + tx), image.pixels.get(row * w + col)) {
++                            *dst = src.to_array();
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    pub fn paint(&mut self, primitives: &[ClippedPrimitive], pixels_per_point: f32) {
++        for p in primitives {
++            let Primitive::Mesh(mesh) = &p.primitive else { continue };
++            let clip = p.clip_rect;
++            let x0 = ((clip.min.x * pixels_per_point).floor() as i32).max(0);
++            let y0 = ((clip.min.y * pixels_per_point).floor() as i32).max(0);
++            let x1 = ((clip.max.x * pixels_per_point).ceil() as i32).min(self.width as i32);
++            let y1 = ((clip.max.y * pixels_per_point).ceil() as i32).min(self.height as i32);
++            if x1 <= x0 || y1 <= y0 {
++                continue;
++            }
++            let texture = self.textures.get(&mesh.texture_id);
++            let user_texture = matches!(mesh.texture_id, TextureId::User(_));
++            let measure = self.measure;
++            // The current run of same-kind triangles and when it started.
++            let mut run: Option<(Kind, std::time::Instant)> = None;
++            for tri in mesh.indices.chunks_exact(3) {
++                let (Some(a), Some(b), Some(c)) =
++                    (mesh.vertices.get(tri[0] as usize), mesh.vertices.get(tri[1] as usize), mesh.vertices.get(tri[2] as usize))
++                else {
++                    continue;
++                };
++                let stats = if measure {
++                    let kind = if user_texture || mesh.texture_id != TextureId::Managed(0) {
++                        Kind::Page
++                    } else if a.uv == b.uv && b.uv == c.uv {
++                        Kind::Solid
++                    } else {
++                        Kind::Atlas
++                    };
++                    if run.is_none_or(|(k, _)| k != kind) {
++                        let now = std::time::Instant::now();
++                        if let Some((k, t)) = run {
++                            self.stats.kinds[k as usize].us += (now - t).as_micros() as u64;
++                        }
++                        self.stats.runs += 1;
++                        run = Some((kind, now));
++                    }
++                    Some(&mut self.stats.kinds[kind as usize])
++                } else {
++                    None
++                };
++                triangle(&mut self.frame, self.width, [x0, y0, x1, y1], pixels_per_point, texture, a, b, c, stats);
++            }
++            if let Some((k, t)) = run {
++                self.stats.kinds[k as usize].us += t.elapsed().as_micros() as u64;
++            }
++        }
++    }
++}
++
++/// Rasterizes one triangle into `frame` within the clip box (pixel units, max exclusive).
++#[allow(clippy::too_many_arguments)]
++fn triangle(
++    frame: &mut [u8],
++    width: usize,
++    clip: [i32; 4],
++    ppp: f32,
++    texture: Option<&Texture>,
++    a: &Vertex,
++    b: &Vertex,
++    c: &Vertex,
++    mut stats: Option<&mut KindStats>,
++) {
++    let (ax, ay) = (a.pos.x * ppp, a.pos.y * ppp);
++    let (bx, by) = (b.pos.x * ppp, b.pos.y * ppp);
++    let (cx, cy) = (c.pos.x * ppp, c.pos.y * ppp);
++    let area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
++    if area.abs() < 1e-6 || !area.is_finite() {
++        return;
++    }
++    let inv_area = 1.0 / area;
++    let min_x = (ax.min(bx).min(cx).floor() as i32).max(clip[0]);
++    let max_x = (ax.max(bx).max(cx).ceil() as i32).min(clip[2]);
++    let min_y = (ay.min(by).min(cy).floor() as i32).max(clip[1]);
++    let max_y = (ay.max(by).max(cy).ceil() as i32).min(clip[3]);
++    if min_x >= max_x || min_y >= max_y {
++        return;
++    }
++    if let Some(st) = stats.as_deref_mut() {
++        st.triangles += 1;
++        // Pixels tested are counted in the row loop (`tested`).
++    }
++    // Counted per triangle, added once at the end: no counter work in the pixel loop beyond
++    // a few local increments.
++    let (mut covered, mut sampled, mut blended, mut opaque, mut tested) = (0u64, 0u64, 0u64, 0u64, 0u64);
++    let ca = a.color.to_array();
++    let cb = b.color.to_array();
++    let cc = c.color.to_array();
++    let flat_color = ca == cb && cb == cc;
++    // A triangle whose three UVs are equal samples one point of its texture at every pixel
++    // (egui's fills use the atlas's white texel): sample once. With a flat colour, the whole
++    // source colour is the same everywhere too. Same arithmetic as the per-pixel path.
++    let uniform = (a.uv == b.uv && b.uv == c.uv).then(|| texture.map(|t| t.sample(a.uv.x, a.uv.y)));
++    let modulate =
++        |color: [f32; 4], s: [f32; 4]| [color[0] * s[0] / 255.0, color[1] * s[1] / 255.0, color[2] * s[2] / 255.0, color[3] * s[3] / 255.0];
++    let flat_src = match uniform {
++        Some(sample) if flat_color => {
++            let color = [ca[0] as f32, ca[1] as f32, ca[2] as f32, ca[3] as f32];
++            Some(sample.map_or(color, |s| modulate(color, s)))
++        }
++        _ => None,
++    };
++    // How each edge function changes per pixel step to the right (d/dx of the expressions below).
++    let e0_dx = by - cy;
++    let e1_dx = cy - ay;
++    let e2_dx = ay - by;
++    for py in min_y..max_y {
++        let sy = py as f32 + 0.5;
++        let sx0 = min_x as f32 + 0.5;
++        let mut w0 = (bx - sx0) * (cy - sy) - (by - sy) * (cx - sx0);
++        let mut w1 = (cx - sx0) * (ay - sy) - (cy - sy) * (ax - sx0);
++        let mut w2 = (ax - sx0) * (by - sy) - (ay - sy) * (bx - sx0);
++        // Normalized to the triangle's winding: inside when all three are >= 0.
++        let sign = if area > 0.0 { 1.0 } else { -1.0 };
++        let row = py as usize * width;
++        // The pixels of this row that can be inside: each edge function is linear along the
++        // row, so its sign changes at most once. Widened by a pixel on each side; the exact
++        // test below still decides every pixel, so coverage follows the same rule.
++        let Some((start, end)) = row_span([(w0, e0_dx), (w1, e1_dx), (w2, e2_dx)], sign, max_x - min_x) else { continue };
++        w0 += e0_dx * start as f32;
++        w1 += e1_dx * start as f32;
++        w2 += e2_dx * start as f32;
++        tested += (end - start) as u64;
++        for px in min_x + start..min_x + end {
++            if w0 * sign >= 0.0 && w1 * sign >= 0.0 && w2 * sign >= 0.0 {
++                covered += 1;
++                let src = match flat_src {
++                    Some(src) => src,
++                    None => {
++                        let l0 = w0 * inv_area;
++                        let l1 = w1 * inv_area;
++                        let l2 = w2 * inv_area;
++                        let color = if flat_color {
++                            [ca[0] as f32, ca[1] as f32, ca[2] as f32, ca[3] as f32]
++                        } else {
++                            let mut v = [0.0f32; 4];
++                            for i in 0..4 {
++                                v[i] = ca[i] as f32 * l0 + cb[i] as f32 * l1 + cc[i] as f32 * l2;
++                            }
++                            v
++                        };
++                        match (uniform, texture) {
++                            (Some(Some(s)), _) => modulate(color, s),
++                            (_, Some(t)) => {
++                                let u = a.uv.x * l0 + b.uv.x * l1 + c.uv.x * l2;
++                                let v = a.uv.y * l0 + b.uv.y * l1 + c.uv.y * l2;
++                                sampled += 1;
++                                modulate(color, t.sample(u, v))
++                            }
++                            (_, None) => color,
++                        }
++                    }
++                };
++                let alpha = src[3];
++                if alpha > 0.0 {
++                    let i = (row + px as usize) * 4;
++                    if let Some(dst) = frame.get_mut(i..i + 4) {
++                        if alpha >= 254.5 {
++                            opaque += 1;
++                            dst[0] = src[0] as u8;
++                            dst[1] = src[1] as u8;
++                            dst[2] = src[2] as u8;
++                            dst[3] = 255;
++                        } else {
++                            blended += 1;
++                            let keep = (255.0 - alpha) / 255.0;
++                            dst[0] = (src[0] + dst[0] as f32 * keep).min(255.0) as u8;
++                            dst[1] = (src[1] + dst[1] as f32 * keep).min(255.0) as u8;
++                            dst[2] = (src[2] + dst[2] as f32 * keep).min(255.0) as u8;
++                            dst[3] = (alpha + dst[3] as f32 * keep).min(255.0) as u8;
++                        }
++                    }
++                }
++            }
++            w0 += e0_dx;
++            w1 += e1_dx;
++            w2 += e2_dx;
++        }
++    }
++    if let Some(st) = stats {
++        st.visited += tested;
++        st.covered += covered;
++        if texture.is_some_and(|t| t.linear) {
++            st.bilinear += sampled;
++        } else {
++            st.nearest += sampled;
++        }
++        st.blended += blended;
++        st.opaque += opaque;
++    }
++}
++
++/// Of the `len` pixels of a row, the range `start..end` (relative to the row's first pixel)
++/// outside of which some edge function is certainly negative: `edges` holds each function's
++/// value at the first pixel and its step per pixel, `sign` the triangle's winding. `None`
++/// when no pixel of the row can be inside.
++fn row_span(edges: [(f32, f32); 3], sign: f32, len: i32) -> Option<(i32, i32)> {
++    let (mut lo, mut hi) = (0.0f32, len as f32);
++    for (w, step) in edges {
++        let (w, step) = (w * sign, step * sign);
++        if step > 0.0 {
++            lo = lo.max(-w / step);
++        } else if step < 0.0 {
++            hi = hi.min(-w / step);
++        } else if w < 0.0 {
++            return None;
++        }
++    }
++    if !(lo <= hi) {
++        return None;
++    }
++    let start = ((lo.floor() as i32) - 1).clamp(0, len);
++    let end = ((hi.ceil() as i32) + 2).clamp(0, len);
++    (start < end).then_some((start, end))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// Every pixel the full test of the old loop finds inside (edge functions accumulated from
++    /// the bounding box's left edge) lies within the row's span, for many random triangles.
++    #[test]
++    fn row_span_keeps_every_covered_pixel() {
++        let mut seed = 0x2545_f491_4f6c_dd1du64;
++        let mut rnd = move |range: f32| {
++            seed ^= seed << 13;
++            seed ^= seed >> 7;
++            seed ^= seed << 17;
++            (seed % 1_000_000) as f32 / 1_000_000.0 * range
++        };
++        let mut checked = 0u64;
++        for case in 0..20_000 {
++            // Large, small, thin and sub-pixel triangles.
++            let scale = [400.0, 40.0, 4.0, 1.5][case % 4];
++            let (ox, oy) = (rnd(300.0), rnd(300.0));
++            let (ax, ay, bx, by, cx, cy) = (ox + rnd(scale), oy + rnd(scale), ox + rnd(scale), oy + rnd(scale), ox + rnd(scale), oy + rnd(scale));
++            let area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
++            if area.abs() < 1e-6 {
++                continue;
++            }
++            let sign = if area > 0.0 { 1.0 } else { -1.0 };
++            let min_x = ax.min(bx).min(cx).floor() as i32;
++            let max_x = ax.max(bx).max(cx).ceil() as i32;
++            let min_y = ay.min(by).min(cy).floor() as i32;
++            let max_y = ay.max(by).max(cy).ceil() as i32;
++            let (e0, e1, e2) = (by - cy, cy - ay, ay - by);
++            for py in min_y..max_y {
++                let sy = py as f32 + 0.5;
++                let sx0 = min_x as f32 + 0.5;
++                let mut w0 = (bx - sx0) * (cy - sy) - (by - sy) * (cx - sx0);
++                let mut w1 = (cx - sx0) * (ay - sy) - (cy - sy) * (ax - sx0);
++                let mut w2 = (ax - sx0) * (by - sy) - (ay - sy) * (bx - sx0);
++                let span = row_span([(w0, e0), (w1, e1), (w2, e2)], sign, max_x - min_x);
++                for k in 0..max_x - min_x {
++                    if w0 * sign >= 0.0 && w1 * sign >= 0.0 && w2 * sign >= 0.0 {
++                        let (s, e) = span.unwrap_or_else(|| panic!("case {case} row {py}: covered pixel {k} but no span"));
++                        assert!(s <= k && k < e, "case {case} row {py}: covered pixel {k} outside {s}..{e}");
++                        checked += 1;
++                    }
++                    w0 += e0;
++                    w1 += e1;
++                    w2 += e2;
++                }
++            }
++        }
++        assert!(checked > 100_000, "{checked}");
++    }
++}
+diff --git a/apps/pdfcraft-aros/src/services.rs b/apps/pdfcraft-aros/src/services.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..85861dddf2962a252cec285ff76c231d5b4cad56
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/services.rs
+@@ -0,0 +1,82 @@
++use crate::ffi;
++use pdfcraft_aros_dialog::{Kind, Request};
++use std::cell::RefCell;
++use std::path::PathBuf;
++use std::rc::Rc;
++pub type SharedWindow = Rc<RefCell<Option<Rc<ffi::Window>>>>;
++thread_local! { static WINDOW: RefCell<Option<SharedWindow>> = const { RefCell::new(None) }; }
++
++pub fn install(window: SharedWindow) {
++    WINDOW.with(|slot| *slot.borrow_mut() = Some(window));
++    let _ = pdfcraft_aros_dialog::install(request);
++    let _ = pdfcraft_aros_clipboard::install(read_clipboard, write_clipboard);
++}
++fn request(request: Request) -> Option<Vec<PathBuf>> {
++    WINDOW.with(|slot| {
++        let shared = slot.borrow().clone()?;
++        let window = shared.borrow().clone()?;
++        let pattern = request
++            .filters
++            .first()
++            .map(|(_, exts)| if exts.iter().any(|s| s == "*") { "#?".to_owned() } else { format!("#?.({})", exts.join("|")) })
++            .unwrap_or_default();
++        let unix_dir = request.directory.to_string_lossy();
++        let mut dir = match unix_dir.strip_prefix('/') {
++            Some(rest) => {
++                let (volume, tail) = rest.split_once('/').unwrap_or((rest, ""));
++                format!("{volume}:{tail}")
++            }
++            None => unix_dir.into_owned(),
++        };
++        let mut file = request.file_name.clone();
++        if dir.is_empty() && !ffi::dir_part(&file).is_empty() {
++            let suggested_dir = ffi::dir_part(&file).to_owned();
++            let suggested_file = ffi::file_part(&file).to_owned();
++            dir = match suggested_dir.strip_prefix('/') {
++                Some(rest) => {
++                    let (volume, tail) = rest.split_once('/').unwrap_or((rest, ""));
++                    format!("{volume}:{tail}")
++                }
++                None => suggested_dir,
++            };
++            file = suggested_file;
++        }
++        let selected = if request.kind == Kind::Folder {
++            window.folder_request(&request.title, &dir)
++        } else {
++            window.file_request(request.kind == Kind::Save, request.kind == Kind::Many, &request.title, &dir, &file, &pattern)
++        };
++        let mut paths = Vec::new();
++        for path in selected {
++            match pdfcraft_platform::paths::aros_to_unix(std::path::Path::new(&path)) {
++                Ok(path) => paths.push(path),
++                Err(error) => {
++                    log::warn!("ASL path: {error}");
++                    return None;
++                }
++            }
++        }
++        Some(paths)
++    })
++}
++
++fn read_clipboard() -> Option<String> {
++    WINDOW.with(|slot| {
++        let shared = slot.borrow().clone()?;
++        if shared.borrow().is_none() {
++            return None;
++        }
++        ffi::clipboard_read_text()
++    })
++}
++fn write_clipboard(text: &str) -> bool {
++    WINDOW.with(|slot| {
++        let Some(shared) = slot.borrow().clone() else {
++            return false;
++        };
++        if shared.borrow().is_none() {
++            return false;
++        }
++        ffi::clipboard_write_text(text)
++    })
++}
+diff --git a/crates/aros-clipboard/Cargo.toml b/crates/aros-clipboard/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..adadadf0eea9d17c9b62388bd1ad6389f9763ff3
+--- /dev/null
++++ b/crates/aros-clipboard/Cargo.toml
+@@ -0,0 +1,8 @@
++[package]
++name = "pdfcraft-aros-clipboard"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++[lints]
++workspace = true
+diff --git a/crates/aros-clipboard/src/lib.rs b/crates/aros-clipboard/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6624c8c86a5bb32347a32c5c5942ee0ff177cecd
+--- /dev/null
++++ b/crates/aros-clipboard/src/lib.rs
+@@ -0,0 +1,54 @@
++//! Text clipboard callbacks from the AROS shell. Image and file-list APIs
++//! return explicit errors until native support is implemented and tested.
++use std::borrow::Cow;
++use std::path::Path;
++use std::sync::OnceLock;
++#[derive(Debug)]
++pub struct Error(&'static str);
++impl std::fmt::Display for Error {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str(self.0)
++    }
++}
++impl std::error::Error for Error {}
++struct Handlers {
++    read: fn() -> Option<String>,
++    write: fn(&str) -> bool,
++}
++static HANDLERS: OnceLock<Handlers> = OnceLock::new();
++pub fn install(read: fn() -> Option<String>, write: fn(&str) -> bool) -> Result<(), &'static str> {
++    HANDLERS.set(Handlers { read, write }).map_err(|_| "clipboard handlers already installed")
++}
++pub struct Clipboard;
++pub struct ImageData<'a> {
++    pub width: usize,
++    pub height: usize,
++    pub bytes: Cow<'a, [u8]>,
++}
++pub struct Set<'a>(&'a mut Clipboard);
++impl Clipboard {
++    pub fn new() -> Result<Self, Error> {
++        HANDLERS.get().map(|_| Self).ok_or(Error("native clipboard not initialized"))
++    }
++    pub fn get_text(&mut self) -> Result<String, Error> {
++        HANDLERS.get().and_then(|h| (h.read)()).ok_or(Error("clipboard contains no text"))
++    }
++    pub fn set_text(&mut self, text: impl AsRef<str>) -> Result<(), Error> {
++        if HANDLERS.get().is_some_and(|h| (h.write)(text.as_ref())) { Ok(()) } else { Err(Error("cannot write clipboard text")) }
++    }
++    pub fn get_image(&mut self) -> Result<ImageData<'static>, Error> {
++        Err(Error("AROS image clipboard is not implemented"))
++    }
++    pub fn set_image(&mut self, _image: ImageData<'_>) -> Result<(), Error> {
++        Err(Error("AROS image clipboard is not implemented"))
++    }
++    pub fn set(&mut self) -> Set<'_> {
++        Set(self)
++    }
++}
++impl Set<'_> {
++    pub fn file_list(self, _paths: &[impl AsRef<Path>]) -> Result<(), Error> {
++        let _ = self.0;
++        Err(Error("AROS clipboard file lists are not implemented"))
++    }
++}
+diff --git a/crates/aros-clipboard/tests/contract.rs b/crates/aros-clipboard/tests/contract.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d74950100d4122ce6c454765f6b8829263f76257
+--- /dev/null
++++ b/crates/aros-clipboard/tests/contract.rs
+@@ -0,0 +1,11 @@
++use pdfcraft_aros_clipboard::{Clipboard, install};
++#[test]
++fn text_uses_native_handlers_and_unsupported_image_copy_is_an_error() {
++    assert!(Clipboard::new().is_err());
++    install(|| Some("native text".into()), |text| text == "new text").unwrap();
++    let mut clipboard = Clipboard::new().unwrap();
++    assert_eq!(clipboard.get_text().unwrap(), "native text");
++    clipboard.set_text("new text").unwrap();
++    assert!(clipboard.get_image().is_err());
++    assert!(clipboard.set().file_list(&[std::path::Path::new("x")]).is_err());
++}
+diff --git a/crates/aros-dialog/Cargo.toml b/crates/aros-dialog/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c281627d71c614ac4257b53f715bcf25e5e6664d
+--- /dev/null
++++ b/crates/aros-dialog/Cargo.toml
+@@ -0,0 +1,8 @@
++[package]
++name = "pdfcraft-aros-dialog"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++[lints]
++workspace = true
+diff --git a/crates/aros-dialog/src/lib.rs b/crates/aros-dialog/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6db4c94a992090769fecfdaaaf21f2a61d76226
+--- /dev/null
++++ b/crates/aros-dialog/src/lib.rs
+@@ -0,0 +1,83 @@
++//! rfd-shaped adapter for the AROS shell. ASL runs on the calling UI task;
++//! only a completed choice is sent to the existing picker worker.
++use std::future::{Ready, ready};
++use std::path::{Path, PathBuf};
++use std::sync::OnceLock;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Kind {
++    Open,
++    Many,
++    Save,
++    Folder,
++}
++#[derive(Clone, Debug)]
++pub struct Request {
++    pub kind: Kind,
++    pub title: String,
++    pub directory: PathBuf,
++    pub file_name: String,
++    pub filters: Vec<(String, Vec<String>)>,
++}
++type Handler = fn(Request) -> Option<Vec<PathBuf>>;
++static HANDLER: OnceLock<Handler> = OnceLock::new();
++/// Install the shell callback once, before creating the application.
++pub fn install(handler: Handler) -> Result<(), &'static str> {
++    HANDLER.set(handler).map_err(|_| "file-dialog handler already installed")
++}
++#[derive(Clone, Debug)]
++pub struct AsyncFileDialog {
++    request: Request,
++}
++impl Default for AsyncFileDialog {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++impl AsyncFileDialog {
++    pub fn new() -> Self {
++        Self { request: Request { kind: Kind::Open, title: String::new(), directory: PathBuf::new(), file_name: String::new(), filters: Vec::new() } }
++    }
++    pub fn set_title(mut self, title: impl Into<String>) -> Self {
++        self.request.title = title.into();
++        self
++    }
++    pub fn set_file_name(mut self, name: impl Into<String>) -> Self {
++        self.request.file_name = name.into();
++        self
++    }
++    pub fn set_directory(mut self, path: impl AsRef<Path>) -> Self {
++        self.request.directory = path.as_ref().into();
++        self
++    }
++    pub fn add_filter(mut self, name: impl Into<String>, extensions: &[impl AsRef<str>]) -> Self {
++        self.request.filters.push((name.into(), extensions.iter().map(|s| s.as_ref().to_owned()).collect()));
++        self
++    }
++    fn choose(mut self, kind: Kind) -> Option<Vec<FileHandle>> {
++        self.request.kind = kind;
++        HANDLER.get().and_then(|handler| handler(self.request)).map(|paths| paths.into_iter().map(FileHandle).collect())
++    }
++    pub fn pick_file(self) -> Ready<Option<FileHandle>> {
++        ready(self.choose(Kind::Open).and_then(|v| v.into_iter().next()))
++    }
++    pub fn pick_files(self) -> Ready<Option<Vec<FileHandle>>> {
++        ready(self.choose(Kind::Many))
++    }
++    pub fn pick_folder(self) -> Ready<Option<FileHandle>> {
++        ready(self.choose(Kind::Folder).and_then(|v| v.into_iter().next()))
++    }
++    pub fn save_file(self) -> Ready<Option<FileHandle>> {
++        ready(self.choose(Kind::Save).and_then(|v| v.into_iter().next()))
++    }
++}
++#[derive(Clone, Debug)]
++pub struct FileHandle(PathBuf);
++impl FileHandle {
++    pub fn path(&self) -> &Path {
++        &self.0
++    }
++    pub fn file_name(&self) -> String {
++        self.0.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
++    }
++}
+diff --git a/crates/aros-dialog/tests/contract.rs b/crates/aros-dialog/tests/contract.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d2ffeac1b83af24ad245ee750142a31537d673e
+--- /dev/null
++++ b/crates/aros-dialog/tests/contract.rs
+@@ -0,0 +1,17 @@
++use pdfcraft_aros_dialog::{AsyncFileDialog, Kind, install};
++use std::sync::atomic::{AtomicUsize, Ordering};
++static CALLS: AtomicUsize = AtomicUsize::new(0);
++#[test]
++fn native_request_is_performed_before_future_moves_to_worker() {
++    install(|request| {
++        assert_eq!(request.kind, Kind::Open);
++        assert_eq!(request.title, "Open PDF");
++        assert_eq!(request.filters[0].1, ["pdf"]);
++        CALLS.fetch_add(1, Ordering::SeqCst);
++        Some(vec!["/RAM/example.pdf".into()])
++    })
++    .unwrap();
++    let future = AsyncFileDialog::new().set_title("Open PDF").add_filter("PDF", &["pdf"]).pick_file();
++    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "ASL must run before the future is sent to another task");
++    drop(future);
++}
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 42e9474f0700b841a312b06f543e05abd05aded0..46ddb673ef98c5746215e576087da9fb30f06c6d 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -12,7 +12,6 @@ workspace = true
+ [dependencies]
+ craft-ui = { workspace = true }
+ # macOS: a window close quits through `terminate:` (the Touch Bar crash, #1136); elsewhere a no-op.
+-craft-quit = { workspace = true, features = ["egui"] }
+ pdfcraft-fonts = { workspace = true }
+ pdfcraft-engine = { workspace = true }
+ pdfcraft-cos = { workspace = true }
+@@ -21,14 +20,12 @@ pdfcraft-model = { workspace = true }
+ pdfcraft-platform = { workspace = true }
+ egui = { workspace = true, features = ["bytemuck"] }
+ egui_extras = { workspace = true }
+-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "persistence", "links"] }
+ serde = { workspace = true }
+ serde_json = { workspace = true }
+ log = { workspace = true }
+ # Hands rendered rasters to egui as its pixels, without copying; already in the tree through egui and wgpu.
+ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+ 
+-rfd = { workspace = true }
+ png = "0.18"
+ base64 = "0.22"
+ # Right-to-left file names in the chrome (egui shapes but does not reorder); already in the tree.
+@@ -41,7 +38,6 @@ skrifa = "0.44"
+ # Control-channel tokens.
+ getrandom = "0.4"
+ # Create ▸ Clipboard (images; already in the tree through egui-winit).
+-arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+ # Waits for native file pickers off the UI thread (already in the tree through wgpu).
+ pollster = "1.0"
+ 
+@@ -83,3 +79,15 @@ skrifa = "0.44"
+ [build-dependencies]
+ serde_json = { workspace = true }
+ toml = "1"
++
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++craft-quit = { workspace = true, features = ["egui"] }
++eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "persistence", "links"] }
++rfd = { workspace = true }
++
++[target.'cfg(all(not(target_os = "aros"), not(target_arch = "wasm32")))'.dependencies]
++arboard = { version = "3.6", default-features = false, features = ["image-data"] }
++
++[target.'cfg(target_os = "aros")'.dependencies]
++pdfcraft-aros-dialog = { path = "../aros-dialog" }
++pdfcraft-aros-clipboard = { path = "../aros-clipboard" }
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index e173b93d4a63ac894986086ad0ffa5d20224871b..639286978fce7d83a5c2a700553adf7cc40ab34a 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -28,6 +28,11 @@ macro_rules! tl_ctx {
+     };
+ }
+ 
++#[cfg(target_os = "aros")]
++extern crate pdfcraft_aros_clipboard as arboard;
++#[cfg(target_os = "aros")]
++extern crate pdfcraft_aros_dialog as rfd;
++
+ mod a11y_ui;
+ mod actions_ui;
+ mod appearance;
+@@ -2903,11 +2908,11 @@ impl PdfCraftApp {
+     }
+ }
+ 
+-impl eframe::App for PdfCraftApp {
++impl PdfCraftApp {
+     /// While files are dragged over the window the system sends no pointer moves, so egui
+     /// would keep the place the pointer entered at: tell it where the pointer really is, so the
+     /// page grid can show (and use) the gap under it.
+-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
++    pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+         // Before egui reads this frame's wheel input.
+         self.scroll_speed.apply(ctx, raw);
+         if raw.hovered_files.is_empty() && raw.dropped_files.is_empty() {
+@@ -2919,11 +2924,12 @@ impl eframe::App for PdfCraftApp {
+         ctx.request_repaint();
+     }
+ 
++    #[cfg(not(target_os = "aros"))]
+     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+         storage.set_string("pdfcraft", self.persist());
+     }
+ 
+-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
++    pub fn logic(&mut self, ctx: &egui::Context) {
+         self.ctx = Some(ctx.clone());
+         self.dialog_epoch();
+         // Notices raised outside `ui` (opened files, OS events, the control channel) translate too.
+@@ -3036,6 +3042,7 @@ impl eframe::App for PdfCraftApp {
+         }
+         self.guard_quit(ctx);
+         // macOS: quit through `terminate:` instead of dropping the window (Touch Bar crash, #1136).
++        #[cfg(not(target_os = "aros"))]
+         craft_quit::on_close_request(ctx);
+         let now = ctx.input(|i| i.time);
+         self.autosave_tick(now);
+@@ -3081,7 +3088,7 @@ impl eframe::App for PdfCraftApp {
+         self.process_picked();
+     }
+ 
+-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
++    pub fn ui(&mut self, ui: &mut egui::Ui) {
+         let ctx = ui.ctx().clone();
+         i18n::set_current(i18n::Lang::from_pref(&self.language));
+         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
+@@ -3192,3 +3199,19 @@ impl PdfCraftApp {
+         }
+     }
+ }
++
++#[cfg(not(target_os = "aros"))]
++impl eframe::App for PdfCraftApp {
++    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
++        PdfCraftApp::raw_input_hook(self, ctx, raw);
++    }
++    fn save(&mut self, storage: &mut dyn eframe::Storage) {
++        PdfCraftApp::save(self, storage);
++    }
++    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
++        PdfCraftApp::logic(self, ctx);
++    }
++    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
++        PdfCraftApp::ui(self, ui);
++    }
++}
+diff --git a/crates/ui-egui/src/widgets.rs b/crates/ui-egui/src/widgets.rs
+index c39f4cf05ee4e08258ebcb6ae54b213a23145f28..2c795be663452fe1d7aa70b20abe6ad4610000f6 100644
+--- a/crates/ui-egui/src/widgets.rs
++++ b/crates/ui-egui/src/widgets.rs
+@@ -500,6 +500,7 @@ pub fn progress_notice(app: &PdfCraftApp, ctx: &egui::Context) -> bool {
+ }
+ 
+ /// The ArtCraft wordmark (Storyteller's brand, docs/brand/; not open source), sized to `height`.
++#[cfg(not(target_os = "aros"))]
+ pub fn artcraft_logo(ui: &mut egui::Ui, height: f32) -> Response {
+     let dark = ui.visuals().dark_mode;
+     let (uri, bytes): (&str, &'static [u8]) = if dark {
+@@ -511,6 +512,7 @@ pub fn artcraft_logo(ui: &mut egui::Ui, height: f32) -> Response {
+ }
+ 
+ /// The ArtCraft mark (brand blue, works on light and dark), `size` points square.
++#[cfg(not(target_os = "aros"))]
+ pub fn artcraft_mark(ui: &mut egui::Ui, size: f32) -> Response {
+     ui.add(
+         egui::Image::from_bytes("bytes://artcraft-mark.svg", include_bytes!("../../../docs/brand/artcraft-mark.svg"))
+@@ -827,3 +829,12 @@ mod tests {
+         assert_eq!(fit_line("ééé", 2.0, width), "é\u{2026}");
+     }
+ }
++
++#[cfg(target_os = "aros")]
++pub fn artcraft_logo(ui: &mut egui::Ui, height: f32) -> Response {
++    ui.label(egui::RichText::new("PdfCraft").size(height))
++}
++#[cfg(target_os = "aros")]
++pub fn artcraft_mark(ui: &mut egui::Ui, size: f32) -> Response {
++    ui.add_sized([size, size], egui::Label::new("PDF"))
++}

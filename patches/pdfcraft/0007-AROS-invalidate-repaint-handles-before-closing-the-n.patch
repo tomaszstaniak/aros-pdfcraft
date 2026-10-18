@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:04:18 +0200
+Subject: [PATCH] AROS: invalidate repaint handles before closing the native
+ window
+
+PdfCraft background contexts may outlive the app. Replace the copied raw-pointer Send/Sync waker with reference-counted state whose mutex covers Signal and invalidation. Window drop waits for an in-flight wake and disables future ones before freeing C storage. Host late-worker regression passes; native close remains to be exercised.
+---
+ apps/pdfcraft-aros/src/ffi.rs  | 30 ++++++++---------
+ apps/pdfcraft-aros/src/main.rs |  1 +
+ apps/pdfcraft-aros/src/wake.rs | 60 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 76 insertions(+), 15 deletions(-)
+ create mode 100644 apps/pdfcraft-aros/src/wake.rs
+
+diff --git a/apps/pdfcraft-aros/src/ffi.rs b/apps/pdfcraft-aros/src/ffi.rs
+index daf9b674ecb264b2d9c02e084dd2015912d9bbd0..616b5fe3ef23151b18648c29c1d1e4545c2771aa 100644
+--- a/apps/pdfcraft-aros/src/ffi.rs
++++ b/apps/pdfcraft-aros/src/ffi.rs
+@@ -179,22 +179,21 @@ pub fn screen_size() -> (i32, i32) {
+ /// The shell's window. Lives on the main thread; only [`Waker`] crosses threads.
+ pub struct Window {
+     raw: *mut WcWindow,
++    wake: std::sync::Arc<crate::wake::Wake>,
+ }
+ 
+-/// Wakes the event loop from another thread (egui's repaint requests from workers).
+-#[derive(Clone, Copy)]
+-pub struct Waker(*mut WcWindow);
+-
+-// SAFETY: wc_window_wake only raises an exec signal for the main task, which is safe from any
+-// task; the pointer is never dereferenced on the other thread beyond that call, and the window
+-// outlives every worker that holds a waker (the app, and its workers, are dropped before it).
+-unsafe impl Send for Waker {}
+-unsafe impl Sync for Waker {}
+-
++/// Repaint token that can safely outlive the UI and its native window.
++#[derive(Clone)]
++pub struct Waker(std::sync::Arc<crate::wake::Wake>);
+ impl Waker {
+     pub fn wake(&self) {
+-        // SAFETY: see the Send impl.
+-        unsafe { wc_window_wake(self.0) }
++        self.0.with_live(|handle| {
++            // SAFETY: Window::drop disables this state before freeing the C window.
++            // The state mutex stays held through Signal(), so close cannot race it.
++            unsafe {
++                wc_window_wake(handle as *mut WcWindow);
++            }
++        });
+     }
+ }
+ 
+@@ -203,11 +202,11 @@ impl Window {
+         let title = text_cstring(title);
+         // SAFETY: the title outlives the call (the C side copies it).
+         let raw = unsafe { wc_window_open(width, height, title.as_ptr()) };
+-        if raw.is_null() { None } else { Some(Self { raw }) }
++        if raw.is_null() { None } else { Some(Self { raw, wake: std::sync::Arc::new(crate::wake::Wake::new(raw as usize)) }) }
+     }
+ 
+     pub fn waker(&self) -> Waker {
+-        Waker(self.raw)
++        Waker(self.wake.clone())
+     }
+ 
+     pub fn inner_size(&self) -> (i32, i32) {
+@@ -286,7 +285,8 @@ impl Window {
+ 
+ impl Drop for Window {
+     fn drop(&mut self) {
+-        // SAFETY: closed exactly once.
++        self.wake.disable();
++        // SAFETY: closed exactly once, after every in-flight wake has finished.
+         unsafe { wc_window_close(self.raw) }
+     }
+ }
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+index 410fe30289d2a9f91875f66b70251ca58602cdc0..a885b7509036ae6598939af71894b49224660152 100644
+--- a/apps/pdfcraft-aros/src/main.rs
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -18,6 +18,7 @@ mod input;
+ mod perf;
+ mod raster;
+ mod services;
++mod wake;
+ 
+ use std::cell::RefCell;
+ use std::rc::Rc;
+diff --git a/apps/pdfcraft-aros/src/wake.rs b/apps/pdfcraft-aros/src/wake.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4b89b826aa8b20d4b4b61e062200015bf8d119b
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/wake.rs
+@@ -0,0 +1,60 @@
++//! A repaint callback may outlive the UI. Disable its opaque native handle
++//! before destroying the window, waiting for any in-flight signal call.
++use std::sync::Mutex;
++
++pub struct Wake {
++    handle: Mutex<Option<usize>>,
++}
++impl Wake {
++    pub fn new(handle: usize) -> Self {
++        Self { handle: Mutex::new(Some(handle)) }
++    }
++    pub fn with_live(&self, signal: impl FnOnce(usize)) {
++        let handle = self.handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(handle) = *handle {
++            signal(handle);
++        }
++    }
++    pub fn disable(&self) {
++        self.handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::Wake;
++    use std::sync::{
++        Arc,
++        atomic::{AtomicBool, AtomicUsize, Ordering},
++    };
++    #[test]
++    fn late_workers_cannot_use_a_destroyed_window_handle() {
++        let wake = Arc::new(Wake::new(7));
++        let closed = Arc::new(AtomicBool::new(false));
++        let calls = Arc::new(AtomicUsize::new(0));
++        wake.with_live(|handle| assert_eq!(handle, 7));
++        let mut workers = Vec::new();
++        for _ in 0..4 {
++            let (wake, closed, calls) = (wake.clone(), closed.clone(), calls.clone());
++            workers.push(std::thread::spawn(move || {
++                for _ in 0..1000 {
++                    wake.with_live(|handle| {
++                        assert_eq!(handle, 7);
++                        assert!(!closed.load(Ordering::SeqCst));
++                        calls.fetch_add(1, Ordering::SeqCst);
++                    });
++                }
++            }));
++        }
++        wake.disable();
++        closed.store(true, Ordering::SeqCst);
++        for worker in workers {
++            worker.join().unwrap();
++        }
++        let before = calls.load(Ordering::SeqCst);
++        wake.with_live(|_| {
++            calls.fetch_add(1, Ordering::SeqCst);
++        });
++        assert_eq!(before, calls.load(Ordering::SeqCst));
++    }
++}

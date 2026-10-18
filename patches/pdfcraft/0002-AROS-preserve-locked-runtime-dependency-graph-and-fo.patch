@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 11:25:43 +0200
+Subject: [PATCH] AROS: preserve locked runtime dependency graph and format CLI
+ wrapper
+
+---
+ Cargo.lock                    | 10 ++++++++++
+ apps/pdfcraft-cli/src/main.rs | 25 ++++++++++++++++++-------
+ 2 files changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index c6f4f49d69e701e190198ebae9ef9f5a76feb165..249436cf018aca868c3bff540898cea4479bec02 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3984,6 +3984,14 @@ dependencies = [
+  "thiserror 2.0.21",
+ ]
+ 
++[[package]]
++name = "pdfcraft-aros-runtime"
++version = "0.9.0"
++dependencies = [
++ "getrandom 0.4.3",
++ "libc",
++]
++
+ [[package]]
+ name = "pdfcraft-audit"
+ version = "0.9.0"
+@@ -4021,12 +4029,14 @@ name = "pdfcraft-cli"
+ version = "0.9.0"
+ dependencies = [
+  "base64 0.22.1",
++ "pdfcraft-aros-runtime",
+  "pdfcraft-audit",
+  "pdfcraft-automation",
+  "pdfcraft-cos",
+  "pdfcraft-engine",
+  "pdfcraft-platform",
+  "pdfcraft-render",
++ "rayon-core",
+  "rustix 1.1.5",
+  "serde_json",
+  "winresource",
+diff --git a/apps/pdfcraft-cli/src/main.rs b/apps/pdfcraft-cli/src/main.rs
+index 0dd6873615cb3a9a30d3a2111b338fbd40bfb374..f02fc4d1da401e634c2128897e17786882a90f2f 100644
+--- a/apps/pdfcraft-cli/src/main.rs
++++ b/apps/pdfcraft-cli/src/main.rs
+@@ -84,19 +84,26 @@ help and feedback: https://discord.gg/artcraft"
+ 
+ fn main() -> ExitCode {
+     #[cfg(not(target_os = "aros"))]
+-    { run_cli() }
++    {
++        run_cli()
++    }
+     #[cfg(target_os = "aros")]
+     {
+         // The starter's Shell/Workbench stack is too small for nested PDF work.
+         // Join before shutting down Rayon, so no command submits work afterwards.
+-        let result = std::thread::Builder::new().name("pdfcraft-cli".into())
+-            .stack_size(2 * 1024 * 1024).spawn(run_cli);
++        let result = std::thread::Builder::new().name("pdfcraft-cli".into()).stack_size(2 * 1024 * 1024).spawn(run_cli);
+         let code = match result {
+             Ok(worker) => match worker.join() {
+                 Ok(code) => code,
+-                Err(_) => { eprintln!("pdfcraft-cli: command panicked"); ExitCode::FAILURE }
++                Err(_) => {
++                    eprintln!("pdfcraft-cli: command panicked");
++                    ExitCode::FAILURE
++                }
+             },
+-            Err(error) => { eprintln!("pdfcraft-cli: cannot create command worker: {error}"); ExitCode::FAILURE }
++            Err(error) => {
++                eprintln!("pdfcraft-cli: cannot create command worker: {error}");
++                ExitCode::FAILURE
++            }
+         };
+         rayon_core::terminate_global_thread_pool();
+         code
+@@ -1080,9 +1087,13 @@ fn control_file_problem(owner: u32, mode: u32, me: u32) -> Option<String> {
+ #[cfg(unix)]
+ fn current_uid() -> u32 {
+     #[cfg(not(target_os = "aros"))]
+-    { rustix::process::geteuid().as_raw() }
++    {
++        rustix::process::geteuid().as_raw()
++    }
+     #[cfg(target_os = "aros")]
+-    { pdfcraft_aros_runtime::effective_uid() }
++    {
++        pdfcraft_aros_runtime::effective_uid()
++    }
+ }
+ 
+ #[cfg(test)]

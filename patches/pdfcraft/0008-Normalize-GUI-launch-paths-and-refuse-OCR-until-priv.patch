@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:10:24 +0200
+Subject: [PATCH] Normalize GUI launch paths and refuse OCR until private
+ workers can stop
+
+---
+ apps/pdfcraft-aros/src/main.rs | 5 ++++-
+ crates/ocr/src/lib.rs          | 9 +++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+index a885b7509036ae6598939af71894b49224660152..402f160bf4997eebd9ba1765ed9ee2c0057de8ef 100644
+--- a/apps/pdfcraft-aros/src/main.rs
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -217,7 +217,10 @@ fn new_app(_window: services::SharedWindow, options: &Options) -> PdfCraftApp {
+     app.integrated_titlebar = false;
+     app.system_title_bar = true;
+     for path in &options.files {
+-        app.open_path(path);
++        match pdfcraft_platform::paths::aros_to_unix(std::path::Path::new(path)) {
++            Ok(path) => app.open_path(&path.to_string_lossy()),
++            Err(error) => app.notify_error(error),
++        }
+     }
+     app
+ }
+diff --git a/crates/ocr/src/lib.rs b/crates/ocr/src/lib.rs
+index affa4ab1631c2699233ce72bae06a28038883f79..27c12944c37c619ba828b73943fb904c8c69f76c 100644
+--- a/crates/ocr/src/lib.rs
++++ b/crates/ocr/src/lib.rs
+@@ -32,6 +32,9 @@ pub enum OcrError {
+     /// `cargo xtask models`). The UI catalogs key this exact text.
+     #[error("the text recognition models are not installed (reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them)")]
+     NoModels,
++    #[cfg(target_os = "aros")]
++    #[error("text recognition is unavailable on AROS until its worker pool supports shutdown")]
++    Unavailable,
+     #[error("loading {0}: {1}")]
+     Load(String, String),
+     #[error("text recognition failed: {0}")]
+@@ -109,6 +112,12 @@ pub struct Ocr {
+ }
+ 
+ impl Ocr {
++    #[cfg(target_os = "aros")]
++    pub fn load(_models: &Models) -> Result<Ocr, OcrError> {
++        Err(OcrError::Unavailable)
++    }
++
++    #[cfg(not(target_os = "aros"))]
+     pub fn load(models: &Models) -> Result<Ocr, OcrError> {
+         let load = |p: &Path| rten::Model::load_file(p).map_err(|e| OcrError::Load(p.display().to_string(), e.to_string()));
+         let params = ocrs::OcrEngineParams {

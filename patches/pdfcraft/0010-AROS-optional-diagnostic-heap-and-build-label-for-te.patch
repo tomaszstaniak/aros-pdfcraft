@@ -1,0 +1,499 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:51:41 +0200
+Subject: [PATCH] AROS: optional diagnostic heap and build label for test
+ builds
+
+The diag-alloc feature (off by default) routes every Rust allocation
+through exec AllocVec so mungwall walls each block, adds tail canaries,
+a checked quarantine for freed blocks and two self-tests, and frees the
+remaining blocks after the pthread exit handler, where the C library's
+pool goes away in the normal build. Findings raise a recoverable alert
+and are appended to RAM:PdfCraft-diag.txt.
+
+PDFCRAFT_AROS_LABEL adds a label to the version shown by --version, the
+window title and $VER, so a screenshot names the build variant.
+---
+ apps/pdfcraft-aros/Cargo.toml     |   4 +
+ apps/pdfcraft-aros/build.rs       |  43 ++++--
+ apps/pdfcraft-aros/c/diag_alloc.c | 245 ++++++++++++++++++++++++++++++
+ apps/pdfcraft-aros/src/diag.rs    |  65 ++++++++
+ apps/pdfcraft-aros/src/main.rs    |  26 +++-
+ 5 files changed, 370 insertions(+), 13 deletions(-)
+ create mode 100644 apps/pdfcraft-aros/c/diag_alloc.c
+ create mode 100644 apps/pdfcraft-aros/src/diag.rs
+
+diff --git a/apps/pdfcraft-aros/Cargo.toml b/apps/pdfcraft-aros/Cargo.toml
+index 1e362cb06b0ce54480ca9a1c291e9fe2e9451226..434889d8f259566c0ed7f1441e635223caf9067e 100644
+--- a/apps/pdfcraft-aros/Cargo.toml
++++ b/apps/pdfcraft-aros/Cargo.toml
+@@ -12,6 +12,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))
+ [[bin]]
+ name = "PdfCraft"
+ path = "src/main.rs"
++[features]
++# Diagnostic build: every Rust allocation is its own exec block (visible to mungwall),
++# with tail canaries, a checked quarantine for freed blocks and self-tests. Not for release.
++diag-alloc = []
+ [dependencies]
+ pdfcraft-engine = { workspace = true }
+ pdfcraft-platform = { workspace = true }
+diff --git a/apps/pdfcraft-aros/build.rs b/apps/pdfcraft-aros/build.rs
+index 41596e70d9bcb5603e1f0e76149d7c2cab2ac9af..629867867a3c3a23429b2bf13819b71aa44522f3 100644
+--- a/apps/pdfcraft-aros/build.rs
++++ b/apps/pdfcraft-aros/build.rs
+@@ -11,6 +11,20 @@ use std::process::Command;
+ 
+ fn main() {
+     println!("cargo:rerun-if-changed=c/aros_shell.c");
++    println!("cargo:rerun-if-changed=c/diag_alloc.c");
++    println!("cargo:rerun-if-env-changed=PDFCRAFT_AROS_LABEL");
++    // The visible version: a labelled build (a test or diagnostic variant) carries its label
++    // in the window title, `--version` and the $VER string, so a screenshot names the variant.
++    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
++    let label = std::env::var("PDFCRAFT_AROS_LABEL").unwrap_or_default();
++    let (shown, name) = if label.is_empty() {
++        (version.clone(), "PdfCraft".to_owned())
++    } else {
++        (format!("{version}-{label}"), format!("PdfCraft-{label}"))
++    };
++    println!("cargo:rustc-env=PDFCRAFT_AROS_VERSION={shown}");
++    // `Version` prints only "name major.minor" from $VER, so the label goes into the name.
++    println!("cargo:rustc-env=PDFCRAFT_AROS_VERTAG={name} {version}");
+     println!("cargo:rerun-if-env-changed=AROS_CC");
+     println!("cargo:rerun-if-env-changed=AROS_AR");
+     println!("cargo:rerun-if-env-changed=AROS_GCC");
+@@ -23,20 +37,29 @@ fn main() {
+     let cc = std::env::var("AROS_CC").or_else(|_| std::env::var("AROS_GCC")).unwrap_or_else(|_| format!("{arch}-aros-cc"));
+     let ar = std::env::var("AROS_AR").unwrap_or_else(|_| format!("{arch}-aros-ar"));
+     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
+-    let obj = out.join("aros_shell.o");
+     let lib = out.join("libpdfcraft_aros_shell.a");
+-    let mut compile = Command::new(&cc);
+-    if let Ok(sdk) = std::env::var("AROS_SDK") {
+-        compile.arg(format!("--sysroot={sdk}"));
++    let mut sources = vec!["aros_shell"];
++    if std::env::var_os("CARGO_FEATURE_DIAG_ALLOC").is_some() {
++        sources.push("diag_alloc");
+     }
+-    let status = compile.args(["-O2", "-Wall", "-Wno-unused-function", "-c", "c/aros_shell.c", "-o"]).arg(&obj).status();
+-    match status {
+-        Ok(s) if s.success() => {}
+-        Ok(s) => panic_build(&format!("{cc} failed with {s}")),
+-        Err(e) => panic_build(&format!("cannot run {cc}: {e}")),
++    let mut objects = Vec::new();
++    for name in sources {
++        let obj = out.join(format!("{name}.o"));
++        let mut compile = Command::new(&cc);
++        if let Ok(sdk) = std::env::var("AROS_SDK") {
++            compile.arg(format!("--sysroot={sdk}"));
++        }
++        let status =
++            compile.args(["-O2", "-Wall", "-Wno-unused-function", "-c"]).arg(format!("c/{name}.c")).arg("-o").arg(&obj).status();
++        match status {
++            Ok(s) if s.success() => {}
++            Ok(s) => panic_build(&format!("{cc} failed with {s}")),
++            Err(e) => panic_build(&format!("cannot run {cc}: {e}")),
++        }
++        objects.push(obj);
+     }
+     let _ = std::fs::remove_file(&lib);
+-    let status = Command::new(&ar).arg("crs").arg(&lib).arg(&obj).status();
++    let status = Command::new(&ar).arg("crs").arg(&lib).args(&objects).status();
+     match status {
+         Ok(s) if s.success() => {}
+         Ok(s) => panic_build(&format!("{ar} failed with {s}")),
+diff --git a/apps/pdfcraft-aros/c/diag_alloc.c b/apps/pdfcraft-aros/c/diag_alloc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e76f3d0353391e31d2f2e06ecf891dc334b463b
+--- /dev/null
++++ b/apps/pdfcraft-aros/c/diag_alloc.c
+@@ -0,0 +1,245 @@
++/*
++ * diag_alloc.c - the Rust heap of the diagnostic build (feature `diag-alloc`).
++ *
++ * In the normal build every Rust allocation is a malloc() from the C library's
++ * memory pool, which mungwall does not check per block: an overrun or a write
++ * after free inside it stays silent until the TLSF heap is already damaged and
++ * an unrelated task (Wanderer, input.device) crashes in tlsf_malloc. Here every
++ * block is its own AllocVec(), so mungwall walls it, and this file adds what
++ * mungwall does not:
++ *
++ * - a 16-byte tail canary, checked when the block is freed;
++ * - freed blocks are filled with a pattern and held in a quarantine before
++ *   FreeVec(), and the pattern is checked when they leave it: a changed byte
++ *   means something wrote to the block after it was freed;
++ * - double and foreign frees are caught by the header state.
++ *
++ * Each finding raises a recoverable exec alert and is written, with the block
++ * details, to RAM:PdfCraft-diag.txt and the debug channel. A finding names the
++ * block and when it was noticed, not necessarily the code that damaged it.
++ * The free site is given relative to report(), to be mapped with nm.
++ *
++ * At exit the blocks still live are freed after the pthread exit handler,
++ * where the normal build's pool goes away, so code that touches program memory
++ * after the program has ended meets the same freed memory as before.
++ */
++
++#include <proto/dos.h>
++#include <proto/exec.h>
++#include <exec/alerts.h>
++#include <exec/lists.h>
++#include <exec/memory.h>
++#include <exec/semaphores.h>
++#include <aros/debug.h>
++#include <aros/symbolsets.h>
++
++#include <stdio.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#define DIAG_MAGIC 0x50444647UL /* "PDFG" */
++#define STATE_LIVE 1
++#define STATE_QUARANTINED 2
++#define CANARY_BYTES 16
++#define CANARY 0xA5
++#define FREED 0xDB
++#define QUARANTINE_BYTES (48UL << 20)
++#define QUARANTINE_BLOCKS 65536UL
++
++struct diag_hdr {
++    struct MinNode node;
++    APTR base;
++    IPTR total;
++    IPTR size;
++    ULONG magic;
++    ULONG state;
++    APTR freer;
++    IPTR serial;
++};
++
++_Static_assert(sizeof(struct diag_hdr) == 64, "header keeps 16-byte alignment");
++
++static struct SignalSemaphore lock;
++static struct MinList live, quarantine;
++static volatile int ready;
++static int closed;
++static IPTR quarantine_bytes, quarantine_blocks, serial;
++
++static void init(void)
++{
++    if (ready)
++        return;
++    Forbid();
++    if (!ready) {
++        InitSemaphore(&lock);
++        NEWLIST((struct List *)&live);
++        NEWLIST((struct List *)&quarantine);
++        ready = 1;
++    }
++    Permit();
++}
++
++static void report(ULONG alert, const char *what, struct diag_hdr *h, IPTR offset)
++{
++    char line[320];
++    struct Task *me = FindTask(NULL);
++    BPTR fh;
++    int n = snprintf(line, sizeof line,
++        "PdfCraft test3-diag: %s; task %s; block %p size %lu serial %lu offset %lu; freed at report%+ld\n",
++        what, me->tc_Node.ln_Name ? me->tc_Node.ln_Name : "?", (UBYTE *)h + sizeof *h,
++        (unsigned long)h->size, (unsigned long)h->serial, (unsigned long)offset,
++        h->freer ? (long)((IPTR)h->freer - (IPTR)&report) : 0L);
++    bug("%s", line);
++    /* Every caller is one of this program's processes, so DOS may be used. */
++    if (n > 0 && me->tc_Node.ln_Type == NT_PROCESS) {
++        fh = Open((CONST_STRPTR)"RAM:PdfCraft-diag.txt", MODE_READWRITE);
++        if (fh) {
++            Seek(fh, 0, OFFSET_END);
++            Write(fh, line, n < (int)sizeof line ? n : (int)sizeof line - 1);
++            Close(fh);
++        }
++    }
++    Alert(alert);
++}
++
++static int canary_ok(struct diag_hdr *h)
++{
++    const UBYTE *c = (const UBYTE *)h + sizeof *h + h->size;
++    int i;
++    for (i = 0; i < CANARY_BYTES; i++)
++        if (c[i] != CANARY)
++            return 0;
++    return 1;
++}
++
++/* First changed byte of a quarantined block, or -1 when the pattern is intact. */
++static long first_change(struct diag_hdr *h)
++{
++    const UBYTE *p = (const UBYTE *)h + sizeof *h;
++    IPTR i, n = h->size + CANARY_BYTES;
++    for (i = 0; i < n; i++)
++        if (p[i] != FREED)
++            return (long)i;
++    return -1;
++}
++
++static void release(struct diag_hdr *h)
++{
++    long changed = first_change(h);
++    if (changed >= 0)
++        report(AN_MemCorrupt & ~AT_DeadEnd, "write after free", h, (IPTR)changed);
++    h->magic = 0;
++    FreeVec(h->base);
++}
++
++/* Lock held. */
++static void trim_quarantine(void)
++{
++    while (quarantine_bytes > QUARANTINE_BYTES || quarantine_blocks > QUARANTINE_BLOCKS) {
++        struct diag_hdr *h = (struct diag_hdr *)RemHead((struct List *)&quarantine);
++        if (!h)
++            break;
++        quarantine_bytes -= h->total;
++        quarantine_blocks--;
++        release(h);
++    }
++}
++
++void *pdfc_diag_alloc(size_t size, size_t align, int zero)
++{
++    struct diag_hdr *h;
++    UBYTE *base, *user;
++    IPTR total;
++
++    init();
++    if (align < 16)
++        align = 16;
++    /* AllocVec returns 16-byte aligned memory and the header is 64 bytes, so for
++     * ordinary alignments the canary ends exactly where mungwall's wall begins. */
++    total = sizeof *h + (align > 16 ? align : 0) + size + CANARY_BYTES;
++    base = AllocVec(total, MEMF_ANY | (zero ? MEMF_CLEAR : 0));
++    if (!base)
++        return NULL;
++    user = (UBYTE *)(((IPTR)base + sizeof *h + align - 1) & ~(IPTR)(align - 1));
++    h = (struct diag_hdr *)(user - sizeof *h);
++    h->base = base;
++    h->total = total;
++    h->size = size;
++    h->magic = DIAG_MAGIC;
++    h->state = STATE_LIVE;
++    h->freer = NULL;
++    memset(user + size, CANARY, CANARY_BYTES);
++
++    ObtainSemaphore(&lock);
++    h->serial = ++serial;
++    if (!closed)
++        AddTail((struct List *)&live, (struct Node *)&h->node);
++    else
++        h->node.mln_Succ = h->node.mln_Pred = NULL;
++    ReleaseSemaphore(&lock);
++    return user;
++}
++
++void pdfc_diag_free(void *p)
++{
++    struct diag_hdr *h;
++
++    if (!p)
++        return;
++    h = (struct diag_hdr *)((UBYTE *)p - sizeof *h);
++    if (h->magic != DIAG_MAGIC) {
++        report(AN_BadFreeAddr, "free of a block this allocator did not hand out", h, 0);
++        return;
++    }
++    h->freer = __builtin_return_address(0);
++    ObtainSemaphore(&lock);
++    if (h->state != STATE_LIVE) {
++        ReleaseSemaphore(&lock);
++        report(AN_FreeTwice, "block freed twice", h, 0);
++        return;
++    }
++    if (!canary_ok(h))
++        report(AN_MemoryInsane, "write past the end of a block", h, h->size);
++    if (h->node.mln_Succ)
++        Remove((struct Node *)&h->node);
++    h->state = STATE_QUARANTINED;
++    memset((UBYTE *)p, FREED, h->size + CANARY_BYTES);
++    if (closed) {
++        ReleaseSemaphore(&lock);
++        h->magic = 0;
++        FreeVec(h->base);
++        return;
++    }
++    AddTail((struct List *)&quarantine, (struct Node *)&h->node);
++    quarantine_bytes += h->total;
++    quarantine_blocks++;
++    trim_quarantine();
++    ReleaseSemaphore(&lock);
++}
++
++/* After __pthread_Exit_Func (priority 0; exit functions run from the highest
++ * priority down), before the C library closes and frees its pool. */
++static void diag_exit(void)
++{
++    struct diag_hdr *h;
++
++    if (!ready)
++        return;
++    ObtainSemaphore(&lock);
++    closed = 1;
++    while ((h = (struct diag_hdr *)RemHead((struct List *)&live))) {
++        if (!canary_ok(h))
++            report(AN_MemoryInsane, "write past the end of a block (found at exit)", h, h->size);
++        h->state = STATE_QUARANTINED;
++        memset((UBYTE *)h + sizeof *h, FREED, h->size + CANARY_BYTES);
++        h->magic = 0;
++        FreeVec(h->base);
++    }
++    while ((h = (struct diag_hdr *)RemHead((struct List *)&quarantine)))
++        release(h);
++    quarantine_bytes = quarantine_blocks = 0;
++    ReleaseSemaphore(&lock);
++}
++
++ADD2EXIT(diag_exit, -100);
+diff --git a/apps/pdfcraft-aros/src/diag.rs b/apps/pdfcraft-aros/src/diag.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..20416f59c373fa9860503cfc7571ab30ad09fcc4
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/diag.rs
+@@ -0,0 +1,65 @@
++//! The diagnostic build's Rust heap (`--features diag-alloc`): every allocation goes through
++//! `c/diag_alloc.c`, one exec block each, so mungwall and the block checks there can see
++//! overruns and writes after free that the C library's pool hides. Not for release builds.
++//!
++//! `PDFCRAFT_DIAG_SELFTEST=overrun|uaf` damages one block on purpose and exits: the positive
++//! control that the checks report on the machine under test.
++
++use std::alloc::{GlobalAlloc, Layout};
++
++unsafe extern "C" {
++    fn pdfc_diag_alloc(size: usize, align: usize, zero: i32) -> *mut u8;
++    fn pdfc_diag_free(p: *mut u8);
++}
++
++struct DiagAlloc;
++
++// SAFETY: the C side returns blocks of at least `size` bytes aligned to `align` (or null), and
++// takes back only pointers it handed out.
++unsafe impl GlobalAlloc for DiagAlloc {
++    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
++        unsafe { pdfc_diag_alloc(layout.size().max(1), layout.align(), 0) }
++    }
++
++    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
++        unsafe { pdfc_diag_alloc(layout.size().max(1), layout.align(), 1) }
++    }
++
++    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
++        unsafe { pdfc_diag_free(ptr) }
++    }
++}
++
++#[global_allocator]
++static ALLOCATOR: DiagAlloc = DiagAlloc;
++
++/// Runs the requested self-test; returns false when none was asked for.
++pub fn self_test() -> bool {
++    let Some(kind) = std::env::var_os("PDFCRAFT_DIAG_SELFTEST") else {
++        return false;
++    };
++    match kind.to_str() {
++        // 32 bytes past a 32-byte block: through the 16-byte canary and 16 bytes into mungwall's
++        // 32-byte wall, never past it (that would damage the next heap block for real).
++        Some("overrun") => {
++            let mut block: Vec<u8> = Vec::with_capacity(32);
++            // SAFETY: deliberately not safe; the damage is the test.
++            unsafe { std::ptr::write_bytes(block.as_mut_ptr(), 0x42, 32 + 32) };
++            drop(block);
++            eprintln!("pdfcraft: self-test overrun done");
++        }
++        // One byte written into a freed block; noticed when the block leaves quarantine at exit.
++        Some("uaf") => {
++            let block = Box::new([0u8; 64]);
++            let raw = Box::into_raw(block) as *mut u8;
++            // SAFETY: deliberately not safe; the damage is the test.
++            unsafe {
++                drop(Box::from_raw(raw as *mut [u8; 64]));
++                std::ptr::write_volatile(raw.add(10), 0x42);
++            }
++            eprintln!("pdfcraft: self-test write-after-free done");
++        }
++        _ => eprintln!("pdfcraft: PDFCRAFT_DIAG_SELFTEST must be overrun or uaf"),
++    }
++    true
++}
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+index 402f160bf4997eebd9ba1765ed9ee2c0057de8ef..bc1472b5e77ec2b0c3e27fa44ef3b98df82cd5ef 100644
+--- a/apps/pdfcraft-aros/src/main.rs
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -13,6 +13,8 @@
+ //! `--window` sets the inner size; `PDFCRAFT_PERF=<file>` records the loop's timings (`perf`).
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+ 
++#[cfg(all(target_os = "aros", feature = "diag-alloc"))]
++mod diag;
+ mod ffi;
+ mod input;
+ mod perf;
+@@ -28,6 +30,19 @@ use std::time::{Duration, Instant};
+ use egui::{OutputCommand, Rect, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2};
+ use pdfcraft_ui_egui::PdfCraftApp;
+ 
++/// The version with the build's label (`0.9.0-test3-diag`), set by build.rs.
++const VERSION: &str = env!("PDFCRAFT_AROS_VERSION");
++
++/// AmigaOS version string, read by the `Version` command.
++#[used]
++static VERSION_TAG: &[u8] = concat!("$VER: ", env!("PDFCRAFT_AROS_VERTAG"), "\0").as_bytes();
++
++/// The window title as shown: a labelled build names its variant there, so a screenshot of a
++/// failure says which build it was.
++fn shown_title(title: &str) -> String {
++    if VERSION == env!("CARGO_PKG_VERSION") { title.to_owned() } else { format!("{title} [{VERSION}]") }
++}
++
+ /// Frames between polls when nothing asks for a repaint: background PDF work and
+ /// autosave still get their turn.
+ const IDLE_POLL: Duration = Duration::from_millis(500);
+@@ -108,7 +123,7 @@ fn parse_args() -> Result<Option<Options>, String> {
+                 return Ok(None);
+             }
+             Some("--version") => {
+-                println!("pdfcraft {}", env!("CARGO_PKG_VERSION"));
++                println!("pdfcraft {VERSION}");
+                 return Ok(None);
+             }
+             Some("--window") => {
+@@ -163,6 +178,11 @@ fn save_prefs(app: &PdfCraftApp) {
+ fn main() {
+     let requesters = pdfcraft_aros_runtime::suppress_requesters();
+     install_logger();
++    #[cfg(all(target_os = "aros", feature = "diag-alloc"))]
++    if diag::self_test() {
++        drop(requesters);
++        std::process::exit(0);
++    }
+     // GUI work must not rely on the launching Shell/Workbench stack size.
+     let worker = std::thread::Builder::new().name("pdfcraft-ui".into()).stack_size(4 * 1024 * 1024).spawn(gui_main);
+     let code = match worker {
+@@ -193,7 +213,7 @@ fn gui_main() -> i32 {
+     };
+     let (sw, sh) = ffi::screen_size();
+     let (w, h) = options.window.unwrap_or((1008.min(sw - 16).max(640), 720.min(sh - 48).max(480)));
+-    let Some(window) = ffi::Window::open(w, h, "PdfCraft") else {
++    let Some(window) = ffi::Window::open(w, h, &shown_title("PdfCraft")) else {
+         return 1;
+     };
+     let window = Rc::new(window);
+@@ -390,7 +410,7 @@ fn run(window: &Rc<ffi::Window>, shared_window: services::SharedWindow, options:
+                     ViewportCommand::Title(t) => {
+                         if *t != title {
+                             title = t.clone();
+-                            window.set_title(&title);
++                            window.set_title(&shown_title(&title));
+                         }
+                     }
+                     ViewportCommand::RequestPaste => input.paste_pending = true,

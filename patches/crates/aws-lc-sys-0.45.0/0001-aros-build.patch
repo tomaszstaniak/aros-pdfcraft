@@ -1,0 +1,93 @@
+From: PdfCraft AROS port
+Subject: [PATCH] aws-lc-sys: initial AROS C build and entropy selection
+
+Base: aws-lc-sys 0.45.0, checksum in ../crates.json.
+Scope: AROS only; preserve other targets and thread synchronization.
+Rationale: AROS GCC does not accept -pthread or explicit -fPIC; pthread is
+linked by the selected target. Use the existing getentropy adapter instead
+of a /dev/urandom path. AWS-LC's separate jitter implementation is omitted; rust-aros getentropy
+retains its tested jitter source. Standard release assembly stays enabled.
+Status: local-only compile probe; no crypto or runtime acceptance.
+Verification: pending. Do not distribute a crypto-capability claim from it.
+---
+--- a/builder/cc_builder.rs
++++ b/builder/cc_builder.rs
+@@ -304,7 +304,7 @@
+             build_options.push(BuildOption::flag("-Wno-unused-parameter"));
+             // On emscripten, `-pthread` forces a shared-memory wasm module
+             // (requires SharedArrayBuffer); build single-threaded instead.
+-            if target_os() != "emscripten" {
++            if target_os() != "emscripten" && target_os() != "aros" {
+                 build_options.push(BuildOption::flag("-pthread"));
+             }
+             if target_os() == "linux" || target_os() == "emscripten" {
+@@ -367,6 +367,9 @@
+ 
+     pub fn create_builder(&self) -> cc::Build {
+         let mut cc_build = cc::Build::new();
++        if target_os() == "aros" {
++            cc_build.pic(false);
++        }
+         let build_options = self.collect_cc_only_build_options();
+         for option in build_options {
+             option.apply_cc(&mut cc_build);
+--- a/aws-lc/include/openssl/target.h
++++ b/aws-lc/include/openssl/target.h
+@@ -103,6 +103,10 @@
+ #endif
+ #endif
+ 
++#if defined(__AROS__)
++#define OPENSSL_AROS
++#endif
++
+ #if defined(_WIN32)
+ #define OPENSSL_WINDOWS
+ #endif
+--- a/aws-lc/crypto/rand_extra/internal.h
++++ b/aws-lc/crypto/rand_extra/internal.h
+@@ -10,7 +10,7 @@
+ #define OPENSSL_RAND_DETERMINISTIC
+ #elif defined(OPENSSL_WINDOWS)
+ #define OPENSSL_RAND_WINDOWS
+-#elif defined(OPENSSL_MACOS) || defined(OPENSSL_OPENBSD) || \
++#elif defined(OPENSSL_AROS) || defined(OPENSSL_MACOS) || defined(OPENSSL_OPENBSD) || \
+     defined(OPENSSL_FREEBSD)  || defined(OPENSSL_NETBSD) || \
+     defined(OPENSSL_SOLARIS) || defined(OPENSSL_WASM) || \
+     (defined(OPENSSL_LINUX) && !defined(HAVE_LINUX_RANDOM_H))
+--- a/aws-lc/crypto/rand_extra/getentropy.c
++++ b/aws-lc/crypto/rand_extra/getentropy.c
+@@ -22,6 +22,11 @@
+ #include <sys/random.h>
+ #endif
+ 
++#if defined(OPENSSL_AROS)
++// Supplied by the explicitly linked rust-aros entropy adapter.
++int getentropy(void *buffer, size_t length);
++#endif
++
+ #if !defined(GETENTROPY_MAX)
+ // Per POSIX 2024
+ // https://pubs.opengroup.org/onlinepubs/9799919799/functions/getentropy.html
+--- a/aws-lc/include/openssl/thread.h
++++ b/aws-lc/include/openssl/thread.h
+@@ -25,7 +25,7 @@
+   void *handle;
+ } CRYPTO_MUTEX;
+ #elif !defined(__GLIBC__)
+-#if defined(OPENSSL_OPENBSD)
++#if defined(OPENSSL_OPENBSD) || defined(OPENSSL_AROS)
+ #include <pthread.h>
+ #endif
+ typedef pthread_rwlock_t CRYPTO_MUTEX;
+--- a/aws-lc/crypto/internal.h
++++ b/aws-lc/crypto/internal.h
+@@ -1371,7 +1371,7 @@
+ // Windows doesn't really support weak symbols as of May 2019, and Clang on
+ // Windows will emit strong symbols instead. See
+ // https://bugs.llvm.org/show_bug.cgi?id=37598
+-#if defined(__ELF__) && defined(__GNUC__)
++#if defined(__ELF__) && defined(__GNUC__) && !defined(OPENSSL_AROS)
+ #define WEAK_SYMBOL_FUNC(rettype, name, args) \
+ rettype name args __attribute__((weak));
+ #else

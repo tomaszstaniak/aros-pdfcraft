@@ -1,0 +1,90 @@
+From: PdfCraft AROS port
+Subject: [PATCH] tempfile: std-based named-file adapter on AROS
+
+Base: tempfile 3.27.0, checksum in ../crates.json.
+Scope: target_os=aros only. Other platforms retain rustix.
+Rationale: avoid importing the full rustix fs surface for named temporary
+files. Use exclusive std opens and hard_link for no-clobber publication;
+unsupported operations fail without deleting existing files. No check-then-
+rename fallback. Unnamed temporary files explicitly remain unsupported.
+Status: local-only; compile and named-file lifecycle acceptance pending.
+---
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -88,7 +88,7 @@
+ [dev-dependencies.doc-comment]
+ version = "0.3"
+ 
+-[target.'cfg(any(unix, target_os = "wasi"))'.dependencies.rustix]
++[target.'cfg(any(all(unix, not(target_os = "aros")), target_os = "wasi"))'.dependencies.rustix]
+ version = "1.1.4"
+ features = ["fs"]
+ 
+--- a/src/file/imp/mod.rs
++++ b/src/file/imp/mod.rs
+@@ -1,4 +1,5 @@
+-#[cfg_attr(any(unix, target_os = "redox", target_os = "wasi"), path = "unix.rs")]
++#[cfg_attr(target_os = "aros", path = "aros.rs")]
++#[cfg_attr(any(all(unix, not(target_os = "aros")), target_os = "redox", target_os = "wasi"), path = "unix.rs")]
+ #[cfg_attr(windows, path = "windows.rs")]
+ #[cfg_attr(
+     not(any(unix, target_os = "redox", target_os = "wasi", windows)),
+--- a/src/dir/imp/mod.rs
++++ b/src/dir/imp/mod.rs
+@@ -1,9 +1,9 @@
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "aros")))]
+ mod unix;
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "aros")))]
+ pub use unix::*;
+ 
+-#[cfg(not(unix))]
++#[cfg(any(not(unix), target_os = "aros"))]
+ mod any;
+-#[cfg(not(unix))]
++#[cfg(any(not(unix), target_os = "aros"))]
+ pub use any::*;
+--- /dev/null
++++ b/src/file/imp/aros.rs
+@@ -0,0 +1,40 @@
++use std::fs::{self, File, OpenOptions};
++use std::io;
++use std::path::Path;
++use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
++
++pub fn create_named(path: &Path, options: &mut OpenOptions, permissions: Option<&fs::Permissions>) -> io::Result<File> {
++    options.read(true).write(true).create_new(true)
++        .mode(permissions.map_or(0o600, PermissionsExt::mode)).open(path)
++}
++
++pub fn create(_dir: &Path) -> io::Result<File> {
++    Err(io::Error::new(io::ErrorKind::Unsupported, "unnamed temporary files are not accepted by this AROS adapter"))
++}
++
++pub fn reopen(file: &File, path: &Path) -> io::Result<File> {
++    use std::os::unix::fs::MetadataExt;
++    let reopened = OpenOptions::new().read(true).write(true).open(path)?;
++    let old = file.metadata()?;
++    let new = reopened.metadata()?;
++    if (old.dev(), old.ino()) != (new.dev(), new.ino()) {
++        return Err(io::Error::new(io::ErrorKind::NotFound, "temporary path was replaced"));
++    }
++    Ok(reopened)
++}
++
++pub fn persist(old: &Path, new: &Path, overwrite: bool) -> io::Result<()> {
++    if overwrite {
++        // The selected CRT can delete the destination before a failed rename.
++        // No accepted overwrite transaction is available in this adapter yet.
++        Err(io::Error::new(io::ErrorKind::Unsupported, "temporary-file overwrite is not accepted on AROS"))
++    } else {
++        // No check-then-rename: hard_link must atomically reject an occupied target.
++        // If this SDK/filesystem refuses links, preserve the temporary file and fail.
++        fs::hard_link(old, new)?;
++        let _ = fs::remove_file(old);
++        Ok(())
++    }
++}
++
++pub fn keep(_path: &Path) -> io::Result<()> { Ok(()) }

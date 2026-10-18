@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 11:20:27 +0200
+Subject: [PATCH] AROS: CLI runtime adapter, owned stack and Rayon shutdown
+
+Scope: x86_64 ABIv11. Reuse entropy and lifecycle policy from WordCraft/PhotoCraft. Keep control-file UID checks. Verification pending cross-build and native run; host behavior unchanged. Local-only; not submitted.
+---
+ apps/pdfcraft-cli/Cargo.toml   |  6 +++++-
+ apps/pdfcraft-cli/src/main.rs  | 26 ++++++++++++++++++++++-
+ crates/aros-runtime/Cargo.toml | 10 +++++++++
+ crates/aros-runtime/src/lib.rs | 38 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 78 insertions(+), 2 deletions(-)
+ create mode 100644 crates/aros-runtime/Cargo.toml
+ create mode 100644 crates/aros-runtime/src/lib.rs
+
+diff --git a/apps/pdfcraft-cli/Cargo.toml b/apps/pdfcraft-cli/Cargo.toml
+index d7b52fbd66d2ddde7509e315108db3078896bfed..4dae9d8c07f10f37bfa1876511611819ff3ca775 100644
+--- a/apps/pdfcraft-cli/Cargo.toml
++++ b/apps/pdfcraft-cli/Cargo.toml
+@@ -22,7 +22,7 @@ pdfcraft-automation = { workspace = true }
+ pdfcraft-platform = { workspace = true }
+ base64 = "0.22"
+ 
+-[target.'cfg(unix)'.dependencies]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies]
+ # `geteuid` for `ui`'s control-file owner check: safe, so no `unsafe` libc call here.
+ # Already in Cargo.lock through the GUI crates.
+ rustix = { version = "1", features = ["process"] }
+@@ -35,3 +35,7 @@ winresource = "0.1"
+ default = ["mcp"]
+ # The opt-in MCP server (`pdfcraft-cli mcp`). Build with --no-default-features to leave it out.
+ mcp = ["pdfcraft-automation/mcp"]
++
++[target.'cfg(target_os = "aros")'.dependencies]
++pdfcraft-aros-runtime = { path = "../../crates/aros-runtime" }
++rayon-core = "1.13"
+diff --git a/apps/pdfcraft-cli/src/main.rs b/apps/pdfcraft-cli/src/main.rs
+index 0e24800d392e7f689d28ae60c2ddc75cc3045b7a..0dd6873615cb3a9a30d3a2111b338fbd40bfb374 100644
+--- a/apps/pdfcraft-cli/src/main.rs
++++ b/apps/pdfcraft-cli/src/main.rs
+@@ -83,6 +83,27 @@ help and feedback: https://discord.gg/artcraft"
+ );
+ 
+ fn main() -> ExitCode {
++    #[cfg(not(target_os = "aros"))]
++    { run_cli() }
++    #[cfg(target_os = "aros")]
++    {
++        // The starter's Shell/Workbench stack is too small for nested PDF work.
++        // Join before shutting down Rayon, so no command submits work afterwards.
++        let result = std::thread::Builder::new().name("pdfcraft-cli".into())
++            .stack_size(2 * 1024 * 1024).spawn(run_cli);
++        let code = match result {
++            Ok(worker) => match worker.join() {
++                Ok(code) => code,
++                Err(_) => { eprintln!("pdfcraft-cli: command panicked"); ExitCode::FAILURE }
++            },
++            Err(error) => { eprintln!("pdfcraft-cli: cannot create command worker: {error}"); ExitCode::FAILURE }
++        };
++        rayon_core::terminate_global_thread_pool();
++        code
++    }
++}
++
++fn run_cli() -> ExitCode {
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     // `<command> --help` too; only right after the command, so a later `-h` (a value) still reaches it.
+     let command = match args.get(1).map(String::as_str) {
+@@ -1058,7 +1079,10 @@ fn control_file_problem(owner: u32, mode: u32, me: u32) -> Option<String> {
+ /// safe and can't fail.
+ #[cfg(unix)]
+ fn current_uid() -> u32 {
+-    rustix::process::geteuid().as_raw()
++    #[cfg(not(target_os = "aros"))]
++    { rustix::process::geteuid().as_raw() }
++    #[cfg(target_os = "aros")]
++    { pdfcraft_aros_runtime::effective_uid() }
+ }
+ 
+ #[cfg(test)]
+diff --git a/crates/aros-runtime/Cargo.toml b/crates/aros-runtime/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e1151815c56541c1602140bcfb75ba722f6a63e
+--- /dev/null
++++ b/crates/aros-runtime/Cargo.toml
+@@ -0,0 +1,10 @@
++[package]
++name = "pdfcraft-aros-runtime"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++[lints.rust]
++unsafe_code = "allow"
++[target.'cfg(target_os = "aros")'.dependencies]
++getrandom = "=0.4.3"
++libc = "0.2"
+diff --git a/crates/aros-runtime/src/lib.rs b/crates/aros-runtime/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ddfd1646e939270913c0c369f09262062e24b61
+--- /dev/null
++++ b/crates/aros-runtime/src/lib.rs
+@@ -0,0 +1,38 @@
++//! getrandom's custom backend for AROS.
++//!
++//! getrandom 0.3 and 0.4 have no AROS backend; builds for AROS select the custom one with
++//! `--cfg getrandom_backend="custom"`, and both versions then call the one
++//! `__getrandom_v03_custom` symbol defined here (their `Error` types have the same layout).
++//! It fills the buffer from `getentropy()`, which the AROS C library adaptation implements
++//! over a jitter entropy source and which fails instead of returning weak bytes.
++//! Linked by the AROS CLI. Derived from WordCraft/PhotoCraft AROS entropy glue.
++
++#[cfg(target_os = "aros")]
++mod aros {
++    /// # Safety
++    /// getrandom calls it with a valid, writable buffer of `len` bytes, possibly uninitialized.
++    #[unsafe(no_mangle)]
++    unsafe fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
++        // getentropy() takes at most 256 bytes per call. The buffer may be uninitialized,
++        // so it is only ever handled through raw pointers.
++        let mut offset = 0;
++        while offset < len {
++            let chunk = (len - offset).min(256);
++            // SAFETY: `offset + chunk <= len`, inside the caller's buffer.
++            if unsafe { libc::getentropy(dest.add(offset).cast(), chunk) } != 0 {
++                // SAFETY: the whole buffer is writable; leave no partial output behind.
++                unsafe { core::ptr::write_bytes(dest, 0, len) };
++                return Err(getrandom::Error::new_custom(1));
++            }
++            offset += chunk;
++        }
++        Ok(())
++    }
++}
++
++/// Effective UID used by the existing control-file ownership checks.
++#[cfg(target_os = "aros")]
++pub fn effective_uid() -> u32 {
++    // SAFETY: no input pointers; the selected libc declares the SDK signature.
++    unsafe { libc::geteuid() }
++}

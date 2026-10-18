@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:00:45 +0200
+Subject: [PATCH] AROS: use SDK local time and restore task requester state
+
+Native -nix run exposed a blocking etc: timezone requester. Use localtime_r and a non-Send requester guard set before workers and restored after joining. C glue builds against explicit matching SDK/compiler. Native follow-up pending; no shared Rust runtime changed.
+---
+ apps/pdfcraft-cli/src/main.rs   |  1 +
+ crates/aros-runtime/Cargo.toml  |  1 +
+ crates/aros-runtime/build.rs    | 30 +++++++++++++++++++++
+ crates/aros-runtime/c/runtime.c | 14 ++++++++++
+ crates/aros-runtime/src/lib.rs  | 46 +++++++++++++++++++++++++++++++++
+ crates/engine/Cargo.toml        |  3 +++
+ crates/engine/src/lib.rs        |  4 ++-
+ 7 files changed, 98 insertions(+), 1 deletion(-)
+ create mode 100644 crates/aros-runtime/build.rs
+ create mode 100644 crates/aros-runtime/c/runtime.c
+
+diff --git a/apps/pdfcraft-cli/src/main.rs b/apps/pdfcraft-cli/src/main.rs
+index f02fc4d1da401e634c2128897e17786882a90f2f..f1413b813dd97f98bac0ade617444ad934f763d2 100644
+--- a/apps/pdfcraft-cli/src/main.rs
++++ b/apps/pdfcraft-cli/src/main.rs
+@@ -89,6 +89,7 @@ fn main() -> ExitCode {
+     }
+     #[cfg(target_os = "aros")]
+     {
++        let _requesters = pdfcraft_aros_runtime::suppress_requesters();
+         // The starter's Shell/Workbench stack is too small for nested PDF work.
+         // Join before shutting down Rayon, so no command submits work afterwards.
+         let result = std::thread::Builder::new().name("pdfcraft-cli".into()).stack_size(2 * 1024 * 1024).spawn(run_cli);
+diff --git a/crates/aros-runtime/Cargo.toml b/crates/aros-runtime/Cargo.toml
+index 7e1151815c56541c1602140bcfb75ba722f6a63e..f321313358a1bbd0c7ac0450bf416995a7d16f21 100644
+--- a/crates/aros-runtime/Cargo.toml
++++ b/crates/aros-runtime/Cargo.toml
+@@ -5,6 +5,7 @@ edition.workspace = true
+ license.workspace = true
+ [lints.rust]
+ unsafe_code = "allow"
++unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))'] }
+ [target.'cfg(target_os = "aros")'.dependencies]
+ getrandom = "=0.4.3"
+ libc = "0.2"
+diff --git a/crates/aros-runtime/build.rs b/crates/aros-runtime/build.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..43e3a000be956dd924e270d963be10431bb21b29
+--- /dev/null
++++ b/crates/aros-runtime/build.rs
+@@ -0,0 +1,30 @@
++use std::{env, path::PathBuf, process::Command};
++fn main() {
++    println!("cargo:rerun-if-changed=c/runtime.c");
++    for key in ["AROS_GCC", "AROS_AR", "AROS_SDK"] {
++        println!("cargo:rerun-if-env-changed={key}");
++    }
++    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("aros") {
++        return;
++    }
++    let gcc = env::var("AROS_GCC").expect("explicit AROS_GCC");
++    let ar = env::var("AROS_AR").expect("explicit AROS_AR");
++    let sdk = env::var("AROS_SDK").expect("explicit AROS_SDK");
++    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
++    let obj = out.join("runtime.o");
++    let lib = out.join("libpdfcraft_aros_runtime.a");
++    assert!(
++        Command::new(gcc)
++            .args([format!("--sysroot={sdk}"), "-O2".into(), "-Wall".into(), "-c".into(), "c/runtime.c".into(), "-o".into()])
++            .arg(&obj)
++            .status()
++            .expect("AROS compiler")
++            .success()
++    );
++    if lib.exists() {
++        std::fs::remove_file(&lib).expect("remove old private archive");
++    }
++    assert!(Command::new(ar).arg("rcs").arg(&lib).arg(&obj).status().expect("AROS archiver").success());
++    println!("cargo:rustc-link-search=native={}", out.display());
++    println!("cargo:rustc-link-lib=static=pdfcraft_aros_runtime");
++}
+diff --git a/crates/aros-runtime/c/runtime.c b/crates/aros-runtime/c/runtime.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0325b63c8927ba4f18782fbcf20bfdf295e8d7ca
+--- /dev/null
++++ b/crates/aros-runtime/c/runtime.c
+@@ -0,0 +1,14 @@
++/* Current-process requester state only: no filesystem or global SDK edits. */
++#include <stdint.h>
++#include <dos/dosextens.h>
++#include <exec/nodes.h>
++#include <proto/exec.h>
++uintptr_t pdfc_set_requester_window(uintptr_t replacement)
++{
++    struct Task *task = FindTask(NULL);
++    if (!task || task->tc_Node.ln_Type != NT_PROCESS) return 0;
++    struct Process *process = (struct Process *)task;
++    uintptr_t previous = (uintptr_t)process->pr_WindowPtr;
++    process->pr_WindowPtr = (struct Window *)replacement;
++    return previous;
++}
+diff --git a/crates/aros-runtime/src/lib.rs b/crates/aros-runtime/src/lib.rs
+index 4ddfd1646e939270913c0c369f09262062e24b61..05c384f56e0bdc17dcbf4658818880448244e138 100644
+--- a/crates/aros-runtime/src/lib.rs
++++ b/crates/aros-runtime/src/lib.rs
+@@ -36,3 +36,49 @@ pub fn effective_uid() -> u32 {
+     // SAFETY: no input pointers; the selected libc declares the SDK signature.
+     unsafe { libc::geteuid() }
+ }
++
++#[cfg(target_os = "aros")]
++unsafe extern "C" {
++    fn pdfc_set_requester_window(replacement: usize) -> usize;
++}
++
++/// Restore requester behavior on this same task after the program's workers end.
++#[cfg(target_os = "aros")]
++pub struct Requesters {
++    previous: usize,
++    local: std::marker::PhantomData<std::rc::Rc<()>>,
++}
++/// Make missing volumes return errors instead of blocking on a system requester.
++/// Keep this guard on the launching task until every worker has been joined.
++#[cfg(target_os = "aros")]
++pub fn suppress_requesters() -> Requesters {
++    // SAFETY: C reads/writes the current Process using the selected SDK layout.
++    Requesters { previous: unsafe { pdfc_set_requester_window(usize::MAX) }, local: std::marker::PhantomData }
++}
++#[cfg(target_os = "aros")]
++impl Drop for Requesters {
++    fn drop(&mut self) {
++        // SAFETY: the Rc marker prevents moving this guard to another task.
++        unsafe {
++            pdfc_set_requester_window(self.previous);
++        }
++    }
++}
++
++/// The selected AROS SDK's localtime_r uses locale.library, without Unix tzfiles.
++#[cfg(target_os = "aros")]
++pub fn utc_offset() -> Option<i64> {
++    // SAFETY: null requests the return value only; no caller buffer is written.
++    let now = unsafe { libc::time(core::ptr::null_mut()) };
++    if now == -1 {
++        return None;
++    }
++    let mut local = core::mem::MaybeUninit::<libc::tm>::zeroed();
++    // SAFETY: both pointers refer to valid allocations of the SDK-declared types.
++    if unsafe { libc::localtime_r(&now, local.as_mut_ptr()) }.is_null() {
++        return None;
++    }
++    // SAFETY: localtime_r succeeded. SDK code stores tm_gmtoff in seconds east of UTC.
++    let offset = unsafe { local.assume_init() }.tm_gmtoff;
++    (-86400..=86400).contains(&offset).then_some(offset as i64)
++}
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+index 74567eb48812032c008af4f20ee4f99ddfe33ebd..b7c003b0bdf9aea05dff9e161ecabeacbe3a6df6 100644
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -47,3 +47,6 @@ unicode-segmentation = "1.13"
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ # Already in the graph through lopdf; used only for the local UTC offset ("today").
+ chrono = { version = "0.4", default-features = false, features = ["clock"] }
++
++[target.'cfg(target_os = "aros")'.dependencies]
++pdfcraft-aros-runtime = { path = "../aros-runtime" }
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 147fc634ec1dee916cabab5fcb13244644e9cd63..01552eba19b572f32fa6df2c79c5132e346e71d2 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -2744,7 +2744,9 @@ fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation
+ 
+ /// Seconds to add to UTC for local time (0 where unknown).
+ fn local_utc_offset() -> i64 {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(target_os = "aros")]
++    return pdfcraft_aros_runtime::utc_offset().unwrap_or(0);
++    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "aros")))]
+     return i64::from(chrono::Local::now().offset().local_minus_utc());
+     #[cfg(target_arch = "wasm32")]
+     return 0;
