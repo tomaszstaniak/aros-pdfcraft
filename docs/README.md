@@ -1,13 +1,6 @@
----
-type: overview
-updated: 2026-10-18
----
+# Documentation
 
-# Contributor documentation
-
-- [Development](development.md)
+- [Download and installation](../README.md)
+- [Building](development.md)
 - [Patch workflow](patching.md)
-
-- [Build tooling provenance](build-tooling.md)
-
-- [Experimental build](releases/test3-diag.md)
+- [Current release](https://github.com/tomaszstaniak/aros-pdfcraft/releases/tag/v0.9.0-test2-r2)

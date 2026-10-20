@@ -1,21 +1,21 @@
 # PdfCraft for AROS
 
-An experimental AROS x86_64 ABIv11 port of [PdfCraft](https://github.com/storytold/pdfcraft), a PDF viewer and editor.
+An AROS port of [PdfCraft](https://github.com/storytold/pdfcraft), a PDF viewer and editor. It provides text search, zoom, page rotation and saving, with command-line tools for extracting text and rendering pages.
 
-This diagnostic build investigates a desktop crash or freeze after closing PdfCraft. Opening a disk drawer afterwards may trigger the failure. The cause remains under investigation; this build does not fix it.
+## Download and run
 
-Each Rust allocation is checked separately. Guard areas, checks of freed blocks and double-free detection can report memory damage. Findings appear as alerts and are written to `RAM:PdfCraft-diag.txt`. Detection may happen after the offending write.
+[Download v0.9.0-test2-r2](https://github.com/tomaszstaniak/aros-pdfcraft/releases/tag/v0.9.0-test2-r2) for **AROS x86_64 ABIv11**, or find `pdfcraft` in the apkg catalogue. The download includes PdfCraft and `pdfcraft-cli`.
 
-The archive contains the GUI and the `grubpatch` helper with its source. Enabling system memory checks changes the boot configuration and requires a restart. The helper accepts only the boot-menu layout it recognises and saves the original as `SYS:boot/grub/grub.cfg.orig`. Follow the included instructions and use `grubpatch RESTORE` afterwards, then restart.
+These builds are experimental and not optimised. They use CPU rendering and can be slow, especially in large windows.
 
-Repeat the original steps: start PdfCraft, close its window, then open a disk drawer. Photograph any alert and its “More...” page. Copy `RAM:PdfCraft-diag.txt` to disk before restarting. Report the result even if no alert appears.
+Unpack into a writable drawer, open a Shell and `CD` to it. Run `Protect PdfCraft +e` and `Protect pdfcraft-cli +e`, then start `PdfCraft`. This release has no Workbench icon.
 
-This build uses more memory and runs more slowly than the normal application. OCR is unavailable.
+## Known limitations
 
-## Sources and build
+A desktop crash or freeze after closing PdfCraft has been reported. The cause remains unresolved. OCR, printing, signing and image clipboard exchange are unavailable. Very large, encrypted or damaged PDFs may not open.
 
-This repository contains the pinned source revisions, AROS patches and build scripts. See [development](docs/development.md), [patching](docs/patching.md) and [upstreams.json](upstreams.json).
+## Build from source
 
-Upstream sources and generated build outputs are fetched or created locally. They are not included in the repository. Mainline ABIv1 is a separate target; these binaries require ABIv11.
+This repository contains source revisions, AROS patches and build scripts. See [Building](docs/development.md), [Patch workflow](docs/patching.md) and [Source revisions](upstreams.json). **For test2-r2, use the source archive attached to the release.** The recipe on `main` is for the separate test3-diag diagnostic build; its instructions do not apply to test2-r2.
 
-Upstream and dependency licenses and author notices are retained in the application archives and pinned sources.
+The repository stores build recipes rather than a full upstream source tree. Licenses and author notices are included in the source and application archives.
