@@ -1,0 +1,47 @@
+From 0bf401d1a634314b629d592dd8098a850a738358 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 18:19:18 +0200
+Subject: [PATCH] aros: preserve the main process directory before starting GUI
+ workers
+
+Problem: ABIv11 crt.library stores chdir's original lock in the shared CRT
+base, but restores it on the main process at shutdown. If the GUI worker
+calls chdir first (including through realpath), CRT saves the worker's lock
+and later unlocks the main process's Workbench startup lock. fromwb then
+unlocks that freed lock again. RAM filesystem lock sharing can hide this.
+Scope: PdfCraft's AROS GUI entry point, before any application workers.
+Use the public chdir API; do not modify the SDK or private CRT fields.
+Failure to preserve the directory stops startup before workers are created.
+Mainline: fromwb still retains and unlocks its original lock. Mainline's
+pthread/CRT thread hooks differ; this is an ABIv11 application adaptation,
+not a replacement for those hooks or a general thread-safe chdir fix.
+Verification: tests/workbench-cwd compares the saved CRT lock against the
+main process's original lock, with and without the initialization.
+Upstream-status: local; candidate for the AROS frontend.
+---
+ apps/pdfcraft-aros/src/main.rs | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+index bc1472b..08e0993 100644
+--- a/apps/pdfcraft-aros/src/main.rs
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -176,6 +176,15 @@ fn save_prefs(app: &PdfCraftApp) {
+     }
+ }
+ fn main() {
++    // ABIv11 CRT shares chdir's saved directory across pthreads, but restores it
++    // on the main process at exit. Save this process's original lock before a
++    // worker's realpath/chdir can save its own. Otherwise CRT frees the lock
++    // that Workbench startup will later UnLock again. chdir(".") preserves the
++    // directory while giving CRT a replacement lock it owns.
++    if let Err(error) = std::env::set_current_dir(".") {
++        eprintln!("pdfcraft: cannot preserve startup directory: {error}");
++        std::process::exit(1);
++    }
+     let requesters = pdfcraft_aros_runtime::suppress_requesters();
+     install_logger();
+     #[cfg(all(target_os = "aros", feature = "diag-alloc"))]
+-- 
+2.54.0 (Apple Git-157)
+

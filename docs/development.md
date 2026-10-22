@@ -42,3 +42,16 @@ OCR is unavailable on AROS: RTen retains a private static Rayon pool with no acc
 ## Detached pthread completion regression
 
 The private pthread series also protects the detached epilogue from code unloading after its slot is cleared. `python3 tests/pthread-exit/build.py <fresh-label>` builds a deliberately widened, test-only epilogue; follow tests/pthread-exit/README.md for the native test. The hook is never linked into PdfCraft. Preserve the final scheduling protection and verify the selected SDK's ReleaseSemaphore implementation before transferring the patch. Shared Rust/SDK installations are not changed by this repository. Mainline v1 has a different completion protocol and needs separate assessment.
+
+## Release packages
+
+Release builds use the CPU renderer, the SDK `-nix` startup and no diagnostic allocator or label. Build them in a build root whose path names no user, so that the paths compiled into the programs (panic locations, the C library's assertions, the OCR model search path) reveal nothing about the build machine; the build remaps the build root to `/build` where the compiler allows it:
+
+    export PDFCRAFT_BUILD_ROOT=/tmp/pdfcraft-release-build
+    python3 scripts/pdfc.py build --online --nix-paths --lto fat -p pdfcraft-aros
+    python3 scripts/pdfc.py build --nix-paths --lto fat -p pdfcraft-cli
+    python3 scripts/package_release.py --gui <GUI build output> --cli <CLI build output> --label test4
+
+Whole-program LTO (`--lto fat`) and stripping unneeded symbols when packaging keep the GUI under the 64 MiB that apkg accepts for one file; a full strip is not used, because AROS needs the relocations it removes. `package_release.py` refuses builds that do not meet these conditions, and writes the program archive (with Workbench icons), the source archive of this repository and `SHA256SUMS` into `dist/`.
+
+`tests/workbench-cwd` checks that the GUI keeps ownership of its Workbench starting drawer when a worker thread changes directory (fixed in patch 0011); run it from a disk drawer, not RAM:.

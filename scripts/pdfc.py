@@ -445,7 +445,10 @@ def cmd_build(args):
     pthread_dir, pthread = build_pthread(cfg, root)
 
     # getrandom has no AROS backend; pdfcraft-aros-entropy supplies the custom one.
-    flags = ["-Cpanic=" + cfg["panic"], "--cfg", 'getrandom_backend="custom"', f"--remap-path-prefix={src}=/pdfcraft",
+    # The build root first: patched crates live under it, and their panic locations would
+    # otherwise carry this machine's paths. A later, more specific prefix wins where both match.
+    flags = ["-Cpanic=" + cfg["panic"], "--cfg", 'getrandom_backend="custom"', f"--remap-path-prefix={root}=/build",
+             f"--remap-path-prefix={src}=/pdfcraft",
              f"--remap-path-prefix={cfg['cargo_home']}=/cargo", f"--remap-path-prefix={libc}=/libc-aros",
              f"--remap-path-prefix={run(['rustc', '+' + cfg['toolchain'], '--print', 'sysroot']).stdout.decode().strip()}=/rust"]
     if cfg["panic"] == "unwind":
@@ -492,8 +495,12 @@ def cmd_build(args):
     for triple in ("x86_64_unknown_aros", "x86_64_aros"):
         env["CC_" + triple] = cfg["aros_gcc"]
         env["AR_" + triple] = cfg["aros_ar"]
-        env["CFLAGS_" + triple] = "--sysroot=" + cfg["aros_sdk"] + " -mcmodel=large -fno-omit-frame-pointer"
+        env["CFLAGS_" + triple] = "--sysroot=" + cfg["aros_sdk"] + " -mcmodel=large -fno-omit-frame-pointer" + f" -ffile-prefix-map={root}=/build"
     env["AWS_LC_SYS_NO_JITTER_ENTROPY"] = "1"
+    # Release builds: whole-program LTO. The GUI is otherwise too large for a package manager's
+    # 64 MiB limit on one file (it is still at the default optimisation level).
+    if args.lto == "fat":
+        command += ["--config", 'profile.release.lto="fat"']
     # A labelled build shows its label in the GUI's version, title and $VER (build.rs).
     if args.label:
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.label):
@@ -514,6 +521,7 @@ def cmd_build(args):
         "abi": "x86_64 ABIv11",
         "path_mode": "SDK -nix startup" if args.nix_paths else "native startup",
         "label": args.label,
+        "lto": args.lto or "thin (workspace default)",
         "features": args.features,
         "work_head": head,
         "test_tool": tool_record,
@@ -615,6 +623,7 @@ def main():
     b.add_argument("--features", help="cargo --features")
     b.add_argument("--no-default-features", action="store_true")
     b.add_argument("--label", help="version label shown by the GUI, e.g. test3-diag")
+    b.add_argument("--lto", choices=["fat"], help="whole-program LTO (release builds)")
     b.add_argument("--worktree", action="store_true", help="build uncommitted files too (recorded as such)")
     b.add_argument("--nix-paths", action="store_true", help="probe SDK POSIX path startup (-nix), one final target only")
     b.add_argument("--online", action="store_true", help="allow cargo to download missing crates")

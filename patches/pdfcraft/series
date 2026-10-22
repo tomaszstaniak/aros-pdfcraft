@@ -8,3 +8,4 @@
 0008-Normalize-GUI-launch-paths-and-refuse-OCR-until-priv.patch
 0009-Register-native-AROS-adapters-in-the-dependency-laye.patch
 0010-AROS-optional-diagnostic-heap-and-build-label-for-te.patch
+0011-AROS-preserve-main-process-directory-before-GUI-workers.patch
