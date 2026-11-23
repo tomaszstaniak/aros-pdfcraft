@@ -1,0 +1,146 @@
+From: PdfCraft AROS port
+Subject: [PATCH] aws-lc-sys: initial AROS C build and entropy selection
+
+Base: aws-lc-sys 0.46.0, checksum in ../crates.json (rebased from 0.45.0
+unchanged, 2026-11-23).
+Scope: AROS only; preserve other targets and thread synchronization.
+Rationale: AROS GCC does not accept -pthread or explicit -fPIC; pthread is
+linked by the selected target. Use the existing getentropy adapter instead
+of a /dev/urandom path. AWS-LC's separate jitter implementation is omitted; rust-aros getentropy
+retains its tested jitter source. Standard release assembly stays enabled.
+Status: local-only compile probe; no crypto or runtime acceptance.
+Verification: pending. Do not distribute a crypto-capability claim from it.
+Build dependency: cc without its `parallel` feature. Cargo's [patch] of
+libc is global, so host build scripts get rust-aros libc-aros too, which has
+only AROS bindings; `parallel` pulls in jobserver, whose host build needs
+the host's libc. The C sources compile one after another instead.
+jitterentropy (built into bcm.c since 0.46): the CPU count through sysconf only
+where the SDK defines _SC_NPROCESSORS_ONLN (the ABIv11 SDK does not; the
+library's own fallback of one CPU is used there). OPENSSL_NO_SOCK on AROS:
+the socket BIOs would call functions the C library does not declare.
+OPENSSL_STATIC_ARMCAP on AROS AArch64: no OS probe for CPU features there. Its separate build is not
+PIC on AROS either, like the main one.
+---
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -106,5 +106,4 @@
+ 
+ [build-dependencies.cc]
+ version = "1.2.41"
+-features = ["parallel"]
+ 
+--- a/builder/cc_builder.rs
++++ b/builder/cc_builder.rs
+@@ -304,7 +304,7 @@
+             build_options.push(BuildOption::flag("-Wno-unused-parameter"));
+             // On emscripten, `-pthread` forces a shared-memory wasm module
+             // (requires SharedArrayBuffer); build single-threaded instead.
+-            if target_os() != "emscripten" {
++            if target_os() != "emscripten" && target_os() != "aros" {
+                 build_options.push(BuildOption::flag("-pthread"));
+             }
+             if target_os() == "linux" || target_os() == "emscripten" {
+@@ -367,6 +367,9 @@
+ 
+     pub fn create_builder(&self) -> cc::Build {
+         let mut cc_build = cc::Build::new();
++        if target_os() == "aros" {
++            cc_build.pic(false);
++        }
+         let build_options = self.collect_cc_only_build_options();
+         for option in build_options {
+             option.apply_cc(&mut cc_build);
+@@ -510,7 +510,11 @@
+             je_builder.define("_DARWIN_C_SOURCE", "1");
+         }
+         // Only enable PIC on non-Windows targets. Windows doesn't support -fPIC.
+-        if target_os() != "windows" {
++        // AROS programs are static and have no GOT (see create_builder); cc would
++        // otherwise choose PIC itself.
++        if target_os() == "aros" {
++            je_builder.pic(false);
++        } else if target_os() != "windows" {
+             je_builder.pic(true);
+         }
+         for &flag in Self::jitter_entropy_dialect_flags(is_cl_like) {
+--- a/aws-lc/include/openssl/target.h
++++ b/aws-lc/include/openssl/target.h
+@@ -103,6 +103,20 @@
+ #endif
+ #endif
+ 
++#if defined(__AROS__)
++#define OPENSSL_AROS
++// AROS sockets are bsdsocket.library's, not the C library's: the socket BIOs
++// would call undeclared functions (an error with Clang on AArch64). PdfCraft
++// does no networking through aws-lc.
++#define OPENSSL_NO_SOCK
++// AArch64: no per-OS CPU feature probe exists for AROS; the features are the
++// ones the compiler targets (baseline ARMv8-A: NEON, no crypto extensions,
++// which the Raspberry Pi 3 lacks).
++#if defined(__aarch64__)
++#define OPENSSL_STATIC_ARMCAP
++#endif
++#endif
++
+ #if defined(_WIN32)
+ #define OPENSSL_WINDOWS
+ #endif
+--- a/aws-lc/crypto/rand_extra/internal.h
++++ b/aws-lc/crypto/rand_extra/internal.h
+@@ -10,7 +10,7 @@
+ #define OPENSSL_RAND_DETERMINISTIC
+ #elif defined(OPENSSL_WINDOWS)
+ #define OPENSSL_RAND_WINDOWS
+-#elif defined(OPENSSL_MACOS) || defined(OPENSSL_OPENBSD) || \
++#elif defined(OPENSSL_AROS) || defined(OPENSSL_MACOS) || defined(OPENSSL_OPENBSD) || \
+     defined(OPENSSL_FREEBSD)  || defined(OPENSSL_NETBSD) || \
+     defined(OPENSSL_SOLARIS) || defined(OPENSSL_WASM) || \
+     (defined(OPENSSL_LINUX) && !defined(HAVE_LINUX_RANDOM_H))
+--- a/aws-lc/crypto/rand_extra/getentropy.c
++++ b/aws-lc/crypto/rand_extra/getentropy.c
+@@ -22,6 +22,11 @@
+ #include <sys/random.h>
+ #endif
+ 
++#if defined(OPENSSL_AROS)
++// Supplied by the explicitly linked rust-aros entropy adapter.
++int getentropy(void *buffer, size_t length);
++#endif
++
+ #if !defined(GETENTROPY_MAX)
+ // Per POSIX 2024
+ // https://pubs.opengroup.org/onlinepubs/9799919799/functions/getentropy.html
+--- a/aws-lc/include/openssl/thread.h
++++ b/aws-lc/include/openssl/thread.h
+@@ -25,7 +25,7 @@
+   void *handle;
+ } CRYPTO_MUTEX;
+ #elif !defined(__GLIBC__)
+-#if defined(OPENSSL_OPENBSD)
++#if defined(OPENSSL_OPENBSD) || defined(OPENSSL_AROS)
+ #include <pthread.h>
+ #endif
+ typedef pthread_rwlock_t CRYPTO_MUTEX;
+--- a/aws-lc/crypto/internal.h
++++ b/aws-lc/crypto/internal.h
+@@ -1371,7 +1371,7 @@
+ // Windows doesn't really support weak symbols as of May 2019, and Clang on
+ // Windows will emit strong symbols instead. See
+ // https://bugs.llvm.org/show_bug.cgi?id=37598
+-#if defined(__ELF__) && defined(__GNUC__)
++#if defined(__ELF__) && defined(__GNUC__) && !defined(OPENSSL_AROS)
+ #define WEAK_SYMBOL_FUNC(rettype, name, args) \
+ rettype name args __attribute__((weak));
+ #else
+--- a/aws-lc/third_party/jitterentropy/jitterentropy-library/jitterentropy-base-user.h
++++ b/aws-lc/third_party/jitterentropy/jitterentropy-library/jitterentropy-base-user.h
+@@ -342,7 +342,7 @@
+ 
+ static inline long jent_ncpu(void)
+ {
+-#if defined(_POSIX_SOURCE) || defined(__APPLE__)
++#if (defined(_POSIX_SOURCE) || defined(__APPLE__)) && defined(_SC_NPROCESSORS_ONLN)
+ 	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+ 
+ 	if (ncpu == -1)

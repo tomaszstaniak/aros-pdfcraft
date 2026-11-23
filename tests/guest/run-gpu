@@ -1,0 +1,24 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; PdfCraft with OpenGL forced: a screenshot start and the scripted session.
+; Unpack the payload to RAM:pc, then: Execute RAM:pc/run-gpu <results directory>
+FailAt 21
+Protect RAM:pc/pdfcraft-cli +e
+Protect RAM:pc/PdfCraft +e
+SetEnv RUST_LOG info
+SetEnv PDFCRAFT_LOG RAM:pc/gpu-1.txt
+RAM:pc/PdfCraft --gui-renderer GPU --window 900x600 --screenshot RAM:pc/gpu-shot.png --screenshot-frames 6 RAM:pc/two-pages.pdf
+Echo $RC >[RUNDIR]/gpu-shot.rc
+SetEnv PDFCRAFT_LOG RAM:pc/gpu-2.txt
+RAM:pc/PdfCraft --gui-renderer GPU --window 900x600 --test-steps RAM:pc/steps-gpu.json RAM:pc/two-pages.pdf
+Echo $RC >[RUNDIR]/gpu-steps.rc
+UnSetEnv PDFCRAFT_LOG
+RAM:pc/pdfcraft-cli info RAM:pc/gpu-saved.pdf >[RUNDIR]/gpu-saved-info.txt
+Echo $RC >[RUNDIR]/gpu-saved-info.rc
+Copy RAM:pc/gpu-shot.png [RUNDIR]/gpu-shot.png
+Copy RAM:pc/gpu-steps-b.png [RUNDIR]/gpu-steps-b.png
+Copy RAM:pc/gpu-saved.pdf [RUNDIR]/gpu-saved.pdf
+Copy RAM:pc/gpu-1.txt [RUNDIR]/gpu-1.txt
+Copy RAM:pc/gpu-2.txt [RUNDIR]/gpu-2.txt
+Echo "done" >[RUNDIR]/done.txt

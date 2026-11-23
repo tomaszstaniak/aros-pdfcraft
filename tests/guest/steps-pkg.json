@@ -1,0 +1,9 @@
+[
+  {"frame": 8, "run": "page.rotate"},
+  {"frame": 12, "pick": ["/RAM/ctest/pkg-saved.pdf"], "run": "file.save_as"},
+  {"frame": 18, "run": "edit.undo"},
+  {"frame": 20, "run": "edit.redo"},
+  {"frame": 22, "run": "file.save"},
+  {"frame": 28, "screenshot": "/RAM/ctest/pkg-a.png"},
+  {"frame": 32, "quit": true}
+]

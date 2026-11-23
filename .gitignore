@@ -31,3 +31,4 @@ __pycache__/
 # blanket-ignored. Record any collection-specific policy in the directory map.
 
 /tests/host-libc/target/
+/local.*.json

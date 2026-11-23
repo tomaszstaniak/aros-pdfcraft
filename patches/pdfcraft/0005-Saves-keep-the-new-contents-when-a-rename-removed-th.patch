@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:06:45 +0100
+Subject: [PATCH] Saves: keep the new contents when a rename removed the old
+ file and failed
+
+---
+ crates/platform/src/staging.rs       | 29 ++++++++++++++++++++++---
+ crates/platform/src/staging/tests.rs | 32 ++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/crates/platform/src/staging.rs b/crates/platform/src/staging.rs
+index 95f879054d9b76acfb4205af10aeb5a8edf07286..fa1149973afd678e34e443b68326ac9b25565858 100644
+--- a/crates/platform/src/staging.rs
++++ b/crates/platform/src/staging.rs
+@@ -154,6 +154,18 @@ pub fn write_atomically_with(
+     form: StagingName,
+     suffixes: impl IntoIterator<Item = u64>,
+     sync_all: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
++) -> std::io::Result<()> {
++    write_atomically_using(path, bytes, form, suffixes, sync_all, |from, to| std::fs::rename(from, to))
++}
++
++/// [`write_atomically_with`] with the rename given, so a test can make it fail.
++fn write_atomically_using(
++    path: &Path,
++    bytes: &[u8],
++    form: StagingName,
++    suffixes: impl IntoIterator<Item = u64>,
++    sync_all: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
++    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+ ) -> std::io::Result<()> {
+     use std::io::Write as _;
+     // A read-only file is not replaced. Windows refuses the rename anyway, but on Unix a rename
+@@ -177,6 +189,7 @@ pub fn write_atomically_with(
+     #[cfg(any(windows, target_os = "macos"))]
+     let created = std::fs::metadata(path).ok().filter(|m| m.is_file()).and_then(|m| m.created().ok());
+     let (tmp, file) = create_staging_as(dir, name, form, suffixes, keep.as_ref())?;
++    let replacing = path.symlink_metadata().is_ok();
+     let result = (|| {
+         // Closed at the end of the block, before the rename (required on Windows).
+         {
+@@ -190,7 +203,7 @@ pub fn write_atomically_with(
+             keep_created(&file, created);
+             sync_staged(&file, sync_all)?;
+         }
+-        let rename_result = std::fs::rename(&tmp, path);
++        let rename_result = rename(&tmp, path);
+         #[cfg(windows)]
+         if rename_result.is_ok()
+             && let Some(keep) = &keep
+@@ -213,10 +226,20 @@ pub fn write_atomically_with(
+         }
+         rename_result
+     })();
+-    if result.is_err() {
++    if let Err(error) = result {
++        // A rename can remove the file it replaces and then fail: some AROS C libraries delete
++        // the destination before they ask DOS to rename. The staging file then holds the only
++        // copy of the document, so it is kept and named in the error.
++        if replacing && path.symlink_metadata().is_err() && tmp.symlink_metadata().is_ok() {
++            return Err(std::io::Error::new(
++                error.kind(),
++                format!("cannot save {}: {error}; the previous file was removed; the new contents are kept in {}", path.display(), tmp.display()),
++            ));
++        }
+         let _ = std::fs::remove_file(&tmp);
++        return Err(error);
+     }
+-    result
++    Ok(())
+ }
+ 
+ /// Copy accessible macOS attributes to the staging descriptor before publication. The kernel
+diff --git a/crates/platform/src/staging/tests.rs b/crates/platform/src/staging/tests.rs
+index 52fe846988e57f214ce5b19b409ec21d2861b542..fe0c471dfbeb897aee7de577e437d6a06383cc9d 100644
+--- a/crates/platform/src/staging/tests.rs
++++ b/crates/platform/src/staging/tests.rs
+@@ -549,3 +549,35 @@ fn a_replaced_local_file_keeps_archive_bit_intact() {
+ 
+     let _ = std::fs::remove_dir_all(&dir);
+ }
++
++/// A rename that removed the old file and then failed leaves the staging file, the only copy of
++/// the new contents, in place, and the error names it.
++#[test]
++fn a_rename_that_removes_the_target_and_fails_keeps_the_new_contents() {
++    let dir = test_dir("delete-then-fail");
++    let target = dir.join("out.pdf");
++    std::fs::write(&target, b"OLD").unwrap();
++    let error = write_atomically_using(&target, b"NEW", StagingName::SuffixThenTag, [42], |_| Ok(()), |_, to| {
++        std::fs::remove_file(to)?;
++        Err(std::io::Error::other("injected delete-then-fail"))
++    })
++    .unwrap_err();
++    let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
++    assert_eq!(remaining.len(), 1);
++    assert_eq!(std::fs::read(&remaining[0]).unwrap(), b"NEW");
++    assert!(error.to_string().contains(&remaining[0].display().to_string()));
++    std::fs::remove_dir_all(dir).unwrap();
++}
++
++/// A rename that fails without touching the old file still removes the staging file.
++#[test]
++fn a_rename_that_fails_alone_leaves_only_the_old_file() {
++    let dir = test_dir("plain-fail");
++    let target = dir.join("out.pdf");
++    std::fs::write(&target, b"OLD").unwrap();
++    write_atomically_using(&target, b"NEW", StagingName::SuffixThenTag, [43], |_| Ok(()), |_, _| Err(std::io::Error::other("injected"))).unwrap_err();
++    let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
++    assert_eq!(remaining, [target.clone()]);
++    assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
++    std::fs::remove_dir_all(dir).unwrap();
++}

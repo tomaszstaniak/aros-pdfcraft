@@ -1,0 +1,22 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; The installed PdfCraft in RAM:pk used twice: the scripted session on two-pages.pdf (rotate,
+; Save As, undo, redo, Save, quit), its file read back by the CLI, then a start without a file.
+FailAt 21
+SetEnv RUST_LOG info
+RAM:pk/PdfCraft/pdfcraft-cli --version >[RUNDIR]/cli-version.txt
+Echo $RC >[RUNDIR]/cli-version.rc
+RAM:pk/PdfCraft/PdfCraft --version >[RUNDIR]/gui-version.txt
+RAM:pk/PdfCraft/PdfCraft --window 900x600 --test-steps RAM:ctest/steps-pkg.json RAM:ctest/two-pages.pdf
+Echo $RC >[RUNDIR]/gui.rc
+RAM:pk/PdfCraft/pdfcraft-cli info RAM:ctest/pkg-saved.pdf >[RUNDIR]/saved-info.txt
+Echo $RC >[RUNDIR]/saved-info.rc
+Copy RAM:ctest/pkg-saved.pdf [RUNDIR]/pkg-saved.pdf
+RAM:pk/PdfCraft/PdfCraft --window 900x600 --test-steps RAM:ctest/steps-pkg2.json
+Echo $RC >[RUNDIR]/gui2.rc
+List RAM:pk/PdfCraft/PdfCraftData ALL >[RUNDIR]/data.txt
+Copy RAM:pk/PdfCraft/PdfCraftData/PdfCraft.log [RUNDIR]/PdfCraft.log
+Copy RAM:pk/PdfCraft/PdfCraftData/app.json [RUNDIR]/app.json
+Copy RAM:pk/PdfCraft/BUILD.txt [RUNDIR]/BUILD.txt
+Copy RAM:ctest/pkg-b.png [RUNDIR]/pkg-b.png

@@ -1,0 +1,10 @@
+[
+  {"frame": 8, "run": "page.rotate"},
+  {"frame": 12, "screenshot": "/RAM/pc/gpu-steps-a.png"},
+  {"frame": 14, "pick": ["/RAM/pc/gpu-saved.pdf"], "run": "file.save_as"},
+  {"frame": 20, "run": "edit.undo"},
+  {"frame": 22, "run": "edit.redo"},
+  {"frame": 24, "run": "file.save"},
+  {"frame": 30, "screenshot": "/RAM/pc/gpu-steps-b.png"},
+  {"frame": 34, "quit": true}
+]

@@ -1,0 +1,65 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; PdfCraft smoke run: CLI, two GUI starts, a scripted edit saved and read back.
+; Unpack the payload to RAM:pc, then: Execute RAM:pc/run-smoke <results directory>
+FailAt 21
+Protect RAM:pc/pdfcraft-cli +e
+Protect RAM:pc/PdfCraft +e
+SetEnv RUST_LOG info
+Echo "start" >[RUNDIR]/start.txt
+RAM:pc/pdfcraft-cli --version >[RUNDIR]/cli-version.txt
+Echo $RC >[RUNDIR]/cli-version.rc
+RAM:pc/pdfcraft-cli info RAM:pc/two-pages.pdf >[RUNDIR]/cli-info.txt
+Echo $RC >[RUNDIR]/cli-info.rc
+RAM:pc/pdfcraft-cli text RAM:pc/two-pages.pdf >[RUNDIR]/cli-text.txt
+Echo $RC >[RUNDIR]/cli-text.rc
+RAM:pc/pdfcraft-cli render RAM:pc/two-pages.pdf --page 2 --dpi 96 --out RAM:pc/p2.png >[RUNDIR]/cli-render.txt
+Echo $RC >[RUNDIR]/cli-render.rc
+RAM:pc/pdfcraft-cli edit RAM:pc/two-pages.pdf --out RAM:pc/edited.pdf --rotate 1:90 --title "Written on AROS" >[RUNDIR]/cli-edit.txt
+Echo $RC >[RUNDIR]/cli-edit.rc
+; Save over the file just written: an existing destination must be replaced.
+RAM:pc/pdfcraft-cli edit RAM:pc/edited.pdf --out RAM:pc/edited.pdf --insert-blank 1 >[RUNDIR]/cli-edit2.txt
+Echo $RC >[RUNDIR]/cli-edit2.rc
+RAM:pc/pdfcraft-cli info RAM:pc/edited.pdf >[RUNDIR]/cli-info2.txt
+Echo $RC >[RUNDIR]/cli-info2.rc
+RAM:pc/pdfcraft-cli combine RAM:pc/two-pages.pdf RAM:pc/edited.pdf --out RAM:pc/combined.pdf >[RUNDIR]/cli-combine.txt
+Echo $RC >[RUNDIR]/cli-combine.rc
+RAM:pc/pdfcraft-cli info RAM:pc/combined.pdf >[RUNDIR]/cli-info3.txt
+Echo $RC >[RUNDIR]/cli-info3.rc
+RAM:pc/pdfcraft-cli mcp <RAM:pc/mcp-in.txt >[RUNDIR]/cli-mcp.txt
+Echo $RC >[RUNDIR]/cli-mcp.rc
+Echo "cli done" >[RUNDIR]/cli-done.txt
+; GUI: version, a start with a file, an empty one, and the scripted edit.
+RAM:pc/PdfCraft --version >[RUNDIR]/gui-version.txt
+Echo $RC >[RUNDIR]/gui-version.rc
+Avail FLUSH >[RUNDIR]/avail0.txt
+SetEnv PDFCRAFT_LOG RAM:pc/log-1.txt
+RAM:pc/PdfCraft --window 900x600 --screenshot RAM:pc/shot1.png --screenshot-frames 12 RAM:pc/two-pages.pdf
+Echo $RC >[RUNDIR]/shot1.rc
+Avail FLUSH >[RUNDIR]/avail1.txt
+SetEnv PDFCRAFT_LOG RAM:pc/log-2.txt
+RAM:pc/PdfCraft --window 900x600 --screenshot RAM:pc/shot2.png --screenshot-frames 8
+Echo $RC >[RUNDIR]/shot2.rc
+Avail FLUSH >[RUNDIR]/avail2.txt
+SetEnv PDFCRAFT_LOG RAM:pc/log-3.txt
+RAM:pc/PdfCraft --window 900x600 --test-steps RAM:pc/steps.json RAM:pc/two-pages.pdf
+Echo $RC >[RUNDIR]/steps.rc
+Avail FLUSH >[RUNDIR]/avail3.txt
+RAM:pc/pdfcraft-cli info RAM:pc/gui-saved.pdf >[RUNDIR]/gui-saved-info.txt
+Echo $RC >[RUNDIR]/gui-saved-info.rc
+UnSetEnv PDFCRAFT_LOG
+List RAM:pc ALL >[RUNDIR]/list.txt
+Copy RAM:pc/p2.png [RUNDIR]/p2.png
+Copy RAM:pc/edited.pdf [RUNDIR]/edited.pdf
+Copy RAM:pc/combined.pdf [RUNDIR]/combined.pdf
+Copy RAM:pc/gui-saved.pdf [RUNDIR]/gui-saved.pdf
+Copy RAM:pc/shot1.png [RUNDIR]/shot1.png
+Copy RAM:pc/shot2.png [RUNDIR]/shot2.png
+Copy RAM:pc/steps-a.png [RUNDIR]/steps-a.png
+Copy RAM:pc/steps-b.png [RUNDIR]/steps-b.png
+Copy RAM:pc/log-1.txt [RUNDIR]/log-1.txt
+Copy RAM:pc/log-2.txt [RUNDIR]/log-2.txt
+Copy RAM:pc/log-3.txt [RUNDIR]/log-3.txt
+Copy RAM:pc/PdfCraftData/app.json [RUNDIR]/app.json
+Echo "done" >[RUNDIR]/done.txt

@@ -1,11 +1,6 @@
-0001-AROS-CLI-runtime-adapter-owned-stack-and-Rayon-shutd.patch
-0002-AROS-preserve-locked-runtime-dependency-graph-and-fo.patch
-0003-Saves-retain-staged-contents-after-a-destructive-ren.patch
-0004-AROS-normalize-native-volume-prefixes-before-automat.patch
-0005-AROS-use-SDK-local-time-and-restore-task-requester-s.patch
-0006-Add-native-Intuition-frontend-for-the-original-PdfCr.patch
-0007-AROS-invalidate-repaint-handles-before-closing-the-n.patch
-0008-Normalize-GUI-launch-paths-and-refuse-OCR-until-priv.patch
-0009-Register-native-AROS-adapters-in-the-dependency-laye.patch
-0010-AROS-optional-diagnostic-heap-and-build-label-for-te.patch
-0011-AROS-preserve-main-process-directory-before-GUI-workers.patch
+0001-AROS-the-CLI-runs-its-command-on-its-own-stack-witho.patch
+0002-AROS-leave-out-process-group-owner-and-thread-priori.patch
+0003-AROS-build-without-the-self-updater.patch
+0004-AROS-FONTS-as-the-system-font-folder.patch
+0005-Saves-keep-the-new-contents-when-a-rename-removed-th.patch
+0006-AROS-host-PdfCraft-in-an-Intuition-window-through-eg.patch

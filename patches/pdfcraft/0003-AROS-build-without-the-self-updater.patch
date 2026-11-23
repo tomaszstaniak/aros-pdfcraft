@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:09:39 +0100
+Subject: [PATCH] AROS: build without the self-updater
+
+---
+ crates/ui-egui/Cargo.toml              |  6 ++-
+ crates/ui-egui/src/lib.rs              |  2 +-
+ crates/ui-egui/src/platform/updates.rs | 53 ++++++++++++++------------
+ 3 files changed, 35 insertions(+), 26 deletions(-)
+
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index d77cd62188b9d0a0d2347d2bc7d8cb2efe8afb37..cc5231dad55f03e953ad2fca109eb656831c20e9 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -54,8 +54,12 @@ unicode-bidi = "0.3"
+ # that put fallback faces on the interface's baseline (#1676); the same skrifa egui uses.
+ skrifa = "0.44"
+ 
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++# AROS: no self-update. Releases come through the AROS package catalogue, and the updater's
++# HTTPS stack (hyper, rustls) has no AROS build.
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+ craft-update = { workspace = true }
++
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ # Control-channel tokens.
+ getrandom = "0.4"
+ # Create ▸ Clipboard (images; already in the tree through egui-winit).
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 3ab85e0c4fe93c21d60be15dd50c1f2a2f55ffc3..ca8da3894ca1a0b74ca16c153d19322ef432fa3e 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -11,7 +11,7 @@
+ 
+ /// PdfCraft as craft-update knows it, with its 128 px icon and accent colour: the update
+ /// prompt shows both, and an AppImage's menu entry gets the icon.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
+     icon_png: Some(include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.pdfcraft.png")),
+     accent: Some([0xb7, 0x02, 0x28]),
+diff --git a/crates/ui-egui/src/platform/updates.rs b/crates/ui-egui/src/platform/updates.rs
+index df58adb7c5f66a4b94157a8e58d34db2d64acab4..2bdb3b3b09d4145f818131bbcc8a162c971c17ff 100644
+--- a/crates/ui-egui/src/platform/updates.rs
++++ b/crates/ui-egui/src/platform/updates.rs
+@@ -1,10 +1,11 @@
+ //! Help ▸ Check for updates and the check at start, through `craft_update`: the flow itself is its
+ //! `Updater`; this module supplies the suite and the quit path, and shows the result in
+-//! `craft_update`'s `CheckResultDialog`.
++//! `craft_update`'s `CheckResultDialog`. Not on AROS, where releases come through the AROS
++//! package catalogue: as on the web, there is no updater.
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ use craft_update::updater::{Action, CheckSource, Status, Updater};
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ use craft_update::{CheckResultDialog, CheckResultResponse};
+ 
+ use crate::PdfCraftApp;
+@@ -13,19 +14,19 @@ use crate::PdfCraftApp;
+ pub const RELEASES_PAGE: &str = "https://github.com/storytold/pdfcraft/releases";
+ 
+ /// Stands in for the network in tests.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub type UpdateSource = CheckSource;
+ 
+ pub(crate) struct Updates {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     updater: Updater,
+     /// The Updates dialog is showing.
+     pub(crate) open: bool,
+     /// Ask for a newer release at start, unless Preferences says not to; the desktop app turns
+     /// it on, so tests never reach the network.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     startup_check: bool,
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     check_requested: bool,
+     /// How many times `on_exit` called [`Updates::exiting`].
+     #[cfg(test)]
+@@ -40,11 +41,11 @@ impl Updates {
+     /// updates, is open over the whole window. It isn't the Updates dialog (`open`), and it leaves
+     /// the menus on.
+     pub(crate) fn prompt_open(&self) -> bool {
+-        #[cfg(not(target_arch = "wasm32"))]
++        #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+         {
+             self.updater.prompt_open()
+         }
+-        #[cfg(target_arch = "wasm32")]
++        #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+         {
+             false
+         }
+@@ -54,12 +55,12 @@ impl Updates {
+ impl Default for Updates {
+     fn default() -> Self {
+         Self {
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             updater: Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")),
+             open: false,
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             startup_check: false,
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             check_requested: false,
+             #[cfg(test)]
+             exits: 0,
+@@ -72,7 +73,7 @@ impl Default for Updates {
+ impl Updates {
+     /// Starts the helper of an update that waits for the app to exit. Later calls do nothing.
+     pub(crate) fn exiting(&mut self) {
+-        #[cfg(not(target_arch = "wasm32"))]
++        #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+         self.updater.start_pending_update();
+         #[cfg(test)]
+         {
+@@ -82,7 +83,7 @@ impl Updates {
+ 
+     /// Draws the startup prompt and returns what it asks for. `can_start` is false while unsaved
+     /// work holds back a ready update.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     fn show_prompt(&mut self, ctx: &egui::Context, can_start: bool) -> Action {
+         #[cfg(test)]
+         if can_start && std::mem::take(&mut self.close_queued) {
+@@ -92,7 +93,7 @@ impl Updates {
+     }
+ 
+     /// Asks the next frame that may close to close the app, so that a ready update installs.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     fn queue_close(&mut self) {
+         self.updater.restart_to_update();
+         #[cfg(test)]
+@@ -103,7 +104,7 @@ impl Updates {
+ 
+     /// Takes the close that a finished installation queued, so a save after Cancel does not close
+     /// the app. `show_prompt` draws an open startup prompt, so this is for when none is open.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     fn take_queued_close(&mut self, ctx: &egui::Context) {
+         let _ = self.show_prompt(ctx, true);
+     }
+@@ -111,20 +112,20 @@ impl Updates {
+ 
+ impl PdfCraftApp {
+     /// Whether the app asks for a newer release on its first frame (off until the desktop app turns it on).
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     pub fn set_startup_update_check(&mut self, on: bool) {
+         self.updates.startup_check = on;
+     }
+ 
+     /// Replaces the network with `source` (tests).
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     pub fn set_update_source(&mut self, source: UpdateSource) {
+         self.updates.updater = Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).with_source(source);
+     }
+ 
+     /// Help ▸ Check for updates: ask for the latest release and show the outcome.
+     pub fn check_for_updates(&mut self) {
+-        #[cfg(not(target_arch = "wasm32"))]
++        #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+         {
+             self.updates.open = true;
+             self.updates.check_requested = true;
+@@ -133,11 +134,15 @@ impl PdfCraftApp {
+         {
+             self.open_url(RELEASES_PAGE);
+         }
++        // AROS: releases come through the AROS package catalogue (the updater's HTTPS stack has no
++        // AROS build).
++        #[cfg(target_os = "aros")]
++        self.notify("PdfCraft for AROS is updated with the AROS package manager: apkg upgrade pdfcraft".to_owned());
+     }
+ 
+     /// Starts the checks and picks up their answers (each frame).
+     pub(crate) fn poll_updates(&mut self) {
+-        #[cfg(not(target_arch = "wasm32"))]
++        #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+         {
+             let Some(ctx) = self.ctx.clone() else { return };
+             // Settled on the first frame: a preference turned on later waits for the next start.
+@@ -155,7 +160,7 @@ impl PdfCraftApp {
+ 
+ /// The startup prompt, and the Updates dialog that answers Help ▸ Check for updates.
+ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         // The restart helper is scheduled before the app closes, so no update starts over unsaved work.
+         let clean = app.first_dirty().is_none();
+@@ -176,12 +181,12 @@ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
+             answer_result(app, ctx, response);
+         }
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     let _ = (app, ctx);
+ }
+ 
+ /// Carries out the answer to the Updates dialog.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn answer_result(app: &mut PdfCraftApp, ctx: &egui::Context, response: CheckResultResponse) {
+     match response {
+         CheckResultResponse::None => {}
+@@ -197,7 +202,7 @@ fn answer_result(app: &mut PdfCraftApp, ctx: &egui::Context, response: CheckResu
+ /// Restart to Update. With unsaved changes the Updates dialog closes and the quit path asks about
+ /// them; Cancel there leaves the update ready. An open startup prompt keeps its own Restart to
+ /// Update and save-first note, so the app stays open.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn restart_to_update(app: &mut PdfCraftApp, ctx: &egui::Context) {
+     if app.first_dirty().is_none() {
+         app.updates.queue_close();

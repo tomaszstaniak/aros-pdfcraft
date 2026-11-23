@@ -1,0 +1,24 @@
+{
+  "comment": "The app this Craft port builds. scripts/craft.py runs the shared Craft tools pinned in scripts/tooling.json; they read only this file for app-specific names.",
+  "id": "pdfcraft",
+  "name": "PdfCraft",
+  "env_prefix": "PDFCRAFT",
+  "packages": {
+    "pdfcraft-aros": "PdfCraft",
+    "pdfcraft-cli": "pdfcraft-cli"
+  },
+  "tools": {},
+  "craft_fonts": {
+    "comment": "The fallback faces for other scripts that PdfCraft embeds from craft-fonts (Arabic, Hebrew, Thai, Georgian, Devanagari, symbols; about 3 MB). The Japanese, Korean and Chinese faces (about 42 MB) are left out of the AROS programs, which AROS loads into memory whole; the optional Simplified Chinese manifest is not part of the set.",
+    "manifests": [
+      "fonts/manifest.txt"
+    ],
+    "exclude_families": [
+      "Shippori Mincho",
+      "BIZ UDPGothic",
+      "BIZ UDMincho",
+      "Noto Sans CJK SC",
+      "NanumGothic"
+    ]
+  }
+}

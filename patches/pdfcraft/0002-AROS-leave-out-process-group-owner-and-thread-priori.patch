@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:56:56 +0100
+Subject: [PATCH] AROS: leave out process-group, owner and thread-priority
+ calls AROS has no backend for
+
+---
+ apps/pdfcraft-cli/Cargo.toml | 2 +-
+ apps/pdfcraft-cli/src/ui.rs  | 6 ++++--
+ crates/create/Cargo.toml     | 2 +-
+ crates/create/src/office.rs  | 3 ++-
+ crates/optimize/Cargo.toml   | 4 ++--
+ crates/optimize/src/pool.rs  | 2 +-
+ 6 files changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/apps/pdfcraft-cli/Cargo.toml b/apps/pdfcraft-cli/Cargo.toml
+index 3a3f92488179e6894e58ffe37738b827a0d2ca66..920e4d33b94eaed81bdae782747f1117814db89f 100644
+--- a/apps/pdfcraft-cli/Cargo.toml
++++ b/apps/pdfcraft-cli/Cargo.toml
+@@ -27,7 +27,7 @@ base64 = "0.23"
+ # Decodes `render` output in tests/it/owner_password.rs.
+ craft-image-codecs = { workspace = true }
+ 
+-[target.'cfg(unix)'.dependencies]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies]
+ # `geteuid` for `ui`'s control-file owner check: safe, so no `unsafe` libc call here.
+ # Already in Cargo.lock through the GUI crates.
+ rustix = { version = "1", features = ["process"] }
+diff --git a/apps/pdfcraft-cli/src/ui.rs b/apps/pdfcraft-cli/src/ui.rs
+index 0ad18c154b4e77970753d00a4c9e4d456fa0ceff..00994da72ab4849ed1b190e9eab1ccae0dde3eb8 100644
+--- a/apps/pdfcraft-cli/src/ui.rs
++++ b/apps/pdfcraft-cli/src/ui.rs
+@@ -86,6 +86,8 @@ fn read_control_file(file: &str) -> Result<serde_json::Value, String> {
+             if (opened.dev(), opened.ino()) != (at_path.dev(), at_path.ino()) {
+                 return Err(format!("{file}: was replaced while being opened. {CONTROL_FILE_ADVICE}"));
+             }
++            // AROS has one user and no Unix owners or modes on files.
++            #[cfg(not(target_os = "aros"))]
+             if let Some(problem) = control_file_problem(opened.uid(), opened.mode(), current_uid()) {
+                 return Err(format!("{file}: {problem}. {CONTROL_FILE_ADVICE}"));
+             }
+@@ -116,7 +118,7 @@ fn read_control_file(file: &str) -> Result<serde_json::Value, String> {
+ }
+ 
+ /// Why user `me` can't trust a control file with this owner and mode, if they can't.
+-#[cfg(any(test, unix))]
++#[cfg(any(test, all(unix, not(target_os = "aros"))))]
+ fn control_file_problem(owner: u32, mode: u32, me: u32) -> Option<String> {
+     if owner != me {
+         return Some(format!("owned by another user (uid {owner}; you are uid {me}), who may be the one listening for your commands"));
+@@ -128,7 +130,7 @@ fn control_file_problem(owner: u32, mode: u32, me: u32) -> Option<String> {
+ /// The effective user id: the owner of the files this process creates, and so of a control file
+ /// the app wrote for this user. std has no `geteuid` and this crate forbids `unsafe`; rustix's is
+ /// safe and can't fail.
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "aros")))]
+ fn current_uid() -> u32 {
+     rustix::process::geteuid().as_raw()
+ }
+diff --git a/crates/create/Cargo.toml b/crates/create/Cargo.toml
+index 16c5f1cdf6eda55f8af8fd19e9c3c8abb5a0be19..e9335e1a0fe03ebab834144e820e27ddfadaae77 100644
+--- a/crates/create/Cargo.toml
++++ b/crates/create/Cargo.toml
+@@ -24,7 +24,7 @@ thiserror = { workspace = true }
+ # Already in the graph through lopdf; used only to read plain-text files (decode_text).
+ encoding_rs = "0.8"
+ 
+-[target.'cfg(unix)'.dependencies]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies]
+ # Already in the graph (pdfcraft-platform, ui-egui); stops a timed-out LibreOffice's whole process
+ # group, soffice.bin included, without unsafe code.
+ rustix = { version = "1", features = ["process"] }
+diff --git a/crates/create/src/office.rs b/crates/create/src/office.rs
+index 3d8332c1497c032200896fb3fdf9482ce9424ac5..eee6e6a36b6788686185b2852d0b07c4dab7704a 100644
+--- a/crates/create/src/office.rs
++++ b/crates/create/src/office.rs
+@@ -252,7 +252,8 @@ mod native {
+ 
+     /// Kill `child` and every process it started, then reap it.
+     fn kill_tree(child: &mut Child) {
+-        #[cfg(unix)]
++        // AROS has no process groups (and no LibreOffice); the child alone is killed below.
++        #[cfg(all(unix, not(target_os = "aros")))]
+         {
+             use rustix::process::{Pid, Signal, kill_process_group};
+             // The group `process_group(0)` made has the child's id.
+diff --git a/crates/optimize/Cargo.toml b/crates/optimize/Cargo.toml
+index 8d6480ff3ba19ac276b9eba054c150d228680d95..3267721650c23d45b27097f54e2cc25f72a57dec 100644
+--- a/crates/optimize/Cargo.toml
++++ b/crates/optimize/Cargo.toml
+@@ -23,8 +23,8 @@ image = { version = "0.25", default-features = false }
+ craft-jpeg = { workspace = true }
+ craft-image-codecs = { workspace = true }
+ 
+-# Lets other programs go first while a copy is being made.
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++# Lets other programs go first while a copy is being made. Not on AROS, which it has no backend for.
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+ thread-priority = "3.1"
+ 
+ [dev-dependencies]
+diff --git a/crates/optimize/src/pool.rs b/crates/optimize/src/pool.rs
+index 57dcc7fdb165d176de9f3c53f5bf10c45a465083..735dbfe410409ffe61010439259769db2f7df5ff 100644
+--- a/crates/optimize/src/pool.rs
++++ b/crates/optimize/src/pool.rs
+@@ -16,7 +16,7 @@ const CANCEL_CHECK: Duration = Duration::from_millis(100);
+ /// Let other programs go first on this thread: the wait for a copy matters less than whatever else
+ /// is open. A system that refuses leaves it as it was.
+ pub fn give_way_to_other_programs() {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+ }
+ 

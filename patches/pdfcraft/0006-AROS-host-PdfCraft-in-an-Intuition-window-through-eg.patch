@@ -1,0 +1,655 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:14:16 +0100
+Subject: [PATCH] AROS host: PdfCraft in an Intuition window through egui-aros
+
+---
+ apps/pdfcraft-aros/Cargo.toml           |  42 ++
+ apps/pdfcraft-aros/src/main.rs          | 543 ++++++++++++++++++++++++
+ crates/ui-egui/Cargo.toml               |  11 +-
+ crates/ui-egui/src/platform/portable.rs |   4 +
+ 4 files changed, 598 insertions(+), 2 deletions(-)
+ create mode 100644 apps/pdfcraft-aros/Cargo.toml
+ create mode 100644 apps/pdfcraft-aros/src/main.rs
+
+diff --git a/apps/pdfcraft-aros/Cargo.toml b/apps/pdfcraft-aros/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..30fecc783c1ee9d8646615a368a61bc747820b14
+--- /dev/null
++++ b/apps/pdfcraft-aros/Cargo.toml
+@@ -0,0 +1,42 @@
++[package]
++name = "pdfcraft-aros"
++description = "PdfCraft on AROS: the egui interface in an Intuition window, through egui-aros"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++
++# The window, input, renderers, requesters, clipboard, character set and start-up data come
++# from egui-aros (shared by the Craft AROS ports); this crate has no `unsafe` code of its own.
++# Not the workspace lints: their `forbid(unsafe_code)` also rejects the start-up stack record
++# that aros-startup's minimum_stack! macro writes.
++
++[lints.clippy]
++dbg_macro = "warn"
++todo = "warn"
++
++[[bin]]
++name = "PdfCraft"
++path = "src/main.rs"
++
++[dependencies]
++pdfcraft-ui-egui = { workspace = true }
++pdfcraft-engine = { workspace = true }
++pdfcraft-platform = { workspace = true }
++# The app is an eframe::App; egui-aros runs it (see main.rs). glow: on_exit's signature.
++eframe = { workspace = true, features = ["glow"] }
++egui = { workspace = true, features = ["default_fonts"] }
++# Built from a pinned egui-aros commit with its crate patches: see the port's scripts/craft.py.
++# OpenGL is compiled in and chosen at run time (CPU, AUTO or GPU).
++egui-aros = { version = "0.1", features = ["asl", "glow"] }
++# Its minimum_stack! macro (egui_aros::startup is the same crate).
++aros-startup = "0.1"
++serde_json = { workspace = true }
++log = { workspace = true }
++# --screenshot writes PNG.
++craft-image-codecs = { workspace = true }
++
++# The patched rayon-core (see the port's crate patches) can end the global pool's threads, which
++# AROS's pthread library otherwise waits for forever when the program exits.
++[target.'cfg(target_os = "aros")'.dependencies]
++rayon-core = "1.13"
+diff --git a/apps/pdfcraft-aros/src/main.rs b/apps/pdfcraft-aros/src/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..96d1b4f3825b8229a04e94076b60ac680e9fbf03
+--- /dev/null
++++ b/apps/pdfcraft-aros/src/main.rs
+@@ -0,0 +1,543 @@
++//! PdfCraft on AROS.
++//!
++//! The desktop app's interface (`pdfcraft-ui-egui`, an `eframe::App`) runs in an Intuition window
++//! through egui-aros: winit and egui-winit for the window and input, the CPU renderer or OpenGL
++//! for the pixels (chosen at run time: `--gui-renderer`, ToolType `GUI_RENDERER`), ASL for files
++//! (rfd on AROS is egui-aros' ASL version), the system clipboard for text and pictures. The
++//! engine, documents and file formats are the same as on the other platforms; this file follows
++//! the desktop app's start (apps/pdfcraft/src/main.rs). Not here: the single-instance hand-off,
++//! the control file (`--control`), printing and the update check.
++//!
++//! Settings, the log, AutoRecover data and the OCR dictionary are kept in `PdfCraftData` beside
++//! the program: the package carries PdfCraft's portable-mode marker (`PdfCraft.portable`).
++//!
++//! `--screenshot <file>` writes the window's pixels after `--screenshot-frames` frames (20 by
++//! default) and quits; `--test-steps <file.json>` runs commands at given frames. Both are test
++//! aids for systems where the window cannot be watched or driven reliably.
++#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
++
++use std::collections::BTreeMap;
++use std::path::PathBuf;
++use std::sync::Mutex;
++use std::time::Duration;
++
++use eframe::App as _;
++use egui_aros::{launch, startup};
++use pdfcraft_ui_egui::PdfCraftApp;
++
++/// The release name packaging gives (`--version`, the log), else the crate version.
++const RELEASE: &str = match option_env!("PDFCRAFT_RELEASE") {
++    Some(r) => r,
++    None => env!("CARGO_PKG_VERSION"),
++};
++const TARGET: &str = match option_env!("PDFCRAFT_BUILD_TARGET") {
++    Some(t) => t,
++    None => "aros",
++};
++
++const USAGE: &str = "\
++PdfCraft for AROS
++
++Usage: PdfCraft [--gui-renderer CPU|AUTO|GPU] [--window <w>x<h>]
++                [--screenshot <file.png> [--screenshot-frames <n>]] [--test-steps <file.json>] [FILE...]
++
++  --version, -V   print the version and exit
++";
++
++struct Logger;
++
++impl log::Log for Logger {
++    fn enabled(&self, metadata: &log::Metadata) -> bool {
++        metadata.level() <= log::max_level()
++    }
++
++    fn log(&self, record: &log::Record) {
++        if self.enabled(record.metadata()) {
++            log_line(&format!("{} {}: {}", record.level(), record.target(), record.args()));
++        }
++    }
++
++    fn flush(&self) {}
++}
++
++static LOGGER: Logger = Logger;
++
++/// The log file: `PDFCRAFT_LOG` if set, else `PdfCraft.log` in the data folder. A program started
++/// from Workbench has no console, and the AROS Shell cannot redirect a command's error output, so
++/// a failure would otherwise leave nothing to read. Shell starts also print it.
++static LOG_FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
++static SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++fn log_line(line: &str) {
++    use std::io::Write;
++    let file = LOG_FILE.get_or_init(|| {
++        let path = std::env::var_os("PDFCRAFT_LOG")
++            .filter(|p| !p.is_empty())
++            .map(PathBuf::from)
++            .or_else(|| data_dir().map(|d| d.join("PdfCraft.log")))?;
++        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
++    });
++    if let Some(file) = file {
++        let mut file = file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        let _ = writeln!(file, "pdfcraft: {line}");
++        let _ = file.flush();
++    }
++    if SHELL.load(std::sync::atomic::Ordering::Relaxed) || file.is_none() {
++        let _ = writeln!(std::io::stderr(), "pdfcraft: {line}");
++    }
++}
++
++fn install_logger() {
++    let level = match std::env::var("RUST_LOG").ok().as_deref().map(str::trim) {
++        Some("trace") => log::LevelFilter::Trace,
++        Some("debug") => log::LevelFilter::Debug,
++        Some("warn") => log::LevelFilter::Warn,
++        Some("error") => log::LevelFilter::Error,
++        Some("off") => log::LevelFilter::Off,
++        _ => log::LevelFilter::Info,
++    };
++    let default_hook = std::panic::take_hook();
++    std::panic::set_hook(Box::new(move |info| {
++        log::error!("PdfCraft internal error: {info}");
++        default_hook(info);
++    }));
++    if log::set_logger(&LOGGER).is_ok() {
++        log::set_max_level(level);
++    }
++}
++
++/// PdfCraftData beside the program (portable mode), when it is on.
++fn data_dir() -> Option<PathBuf> {
++    pdfcraft_ui_egui::portable::data_dir().map(std::path::Path::to_path_buf)
++}
++
++/// eframe's key-value store for the app's settings, as a JSON object in `PdfCraftData/app.json`
++/// (eframe's own file store needs a per-user folder AROS does not have). Without a data folder
++/// nothing is kept.
++struct FileStorage {
++    path: Option<PathBuf>,
++    values: BTreeMap<String, String>,
++}
++
++impl FileStorage {
++    fn open(path: Option<PathBuf>) -> Self {
++        let values = path
++            .as_ref()
++            .and_then(|p| std::fs::read(p).ok())
++            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| log::warn!("settings: {e}; starting with defaults")).ok())
++            .unwrap_or_default();
++        Self { path, values }
++    }
++}
++
++impl eframe::Storage for FileStorage {
++    fn get_string(&self, key: &str) -> Option<String> {
++        self.values.get(key).cloned()
++    }
++
++    fn set_string(&mut self, key: &str, value: String) {
++        self.values.insert(key.to_owned(), value);
++    }
++
++    fn remove_string(&mut self, key: &str) {
++        self.values.remove(key);
++    }
++
++    /// Written to a new file that then replaces the old one, as documents are.
++    fn flush(&mut self) {
++        let Some(path) = &self.path else { return };
++        let result = serde_json::to_vec_pretty(&self.values)
++            .map_err(std::io::Error::other)
++            .and_then(|bytes| pdfcraft_platform::staging::write_atomically(path, &bytes, pdfcraft_platform::staging::StagingName::SuffixThenTag));
++        if let Err(e) = result {
++            log::error!("settings: cannot write {}: {e}", path.display());
++        }
++    }
++}
++
++struct Options {
++    files: Vec<String>,
++    window: Option<(i32, i32)>,
++    screenshot: Option<String>,
++    screenshot_frames: u64,
++    test_steps: Vec<Step>,
++}
++
++/// One step of `--test-steps`: at frame `frame`, run a command as the menus do (`run`), open a
++/// file (`open`), answer the next file dialog (`pick`, a list of names), take a screenshot or
++/// quit. Each step is logged.
++#[derive(Debug)]
++struct Step {
++    frame: u64,
++    run: Option<String>,
++    open: Option<String>,
++    pick: Option<Vec<String>>,
++    screenshot: Option<String>,
++    quit: bool,
++}
++
++fn read_steps(path: &str) -> Result<Vec<Step>, String> {
++    let text = std::fs::read_to_string(path).map_err(|e| format!("--test-steps {path}: {e}"))?;
++    let list: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| format!("--test-steps {path}: {e}"))?;
++    let mut steps = Vec::new();
++    for v in list {
++        let frame = v.get("frame").and_then(serde_json::Value::as_u64).ok_or_else(|| format!("--test-steps: a step without a frame: {v}"))?;
++        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
++        steps.push(Step {
++            frame,
++            run: text("run"),
++            open: text("open"),
++            pick: v.get("pick").and_then(serde_json::Value::as_array).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect()),
++            screenshot: text("screenshot"),
++            quit: v.get("quit").and_then(serde_json::Value::as_bool).unwrap_or(false),
++        });
++    }
++    steps.sort_by_key(|s| s.frame);
++    Ok(steps)
++}
++
++/// The Shell arguments after the renderer choice was taken out. Document names are resolved by
++/// DOS now, in the directory they were typed in (volumes, assigns, relative names, `/` parents).
++fn parse_args(args: Vec<String>) -> Result<Option<Options>, String> {
++    let mut o = Options { files: Vec::new(), window: None, screenshot: None, screenshot_frames: 20, test_steps: Vec::new() };
++    let mut args = args.into_iter();
++    while let Some(a) = args.next() {
++        match a.as_str() {
++            "--help" | "-h" => {
++                println!("{USAGE}\n{}", launch::HELP);
++                return Ok(None);
++            }
++            "--version" | "-V" => {
++                println!("PdfCraft {RELEASE} for AROS ({TARGET})");
++                return Ok(None);
++            }
++            "--control" => return Err("--control: the control file is not available on AROS".to_owned()),
++            "--window" => {
++                let v = args.next().unwrap_or_default();
++                let size = v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
++                o.window = Some(size.ok_or_else(|| format!("--window: \"{v}\" is not <width>x<height>"))?);
++            }
++            "--screenshot" => o.screenshot = args.next(),
++            "--test-steps" => o.test_steps = read_steps(&args.next().unwrap_or_default())?,
++            "--screenshot-frames" => {
++                let v = args.next().unwrap_or_default();
++                o.screenshot_frames = v.parse().map_err(|_| format!("--screenshot-frames: \"{v}\" is not a number"))?;
++            }
++            "--" => {
++                for name in args.by_ref() {
++                    o.files.push(resolve(&name)?);
++                }
++            }
++            s if s.starts_with("--") => return Err(format!("unknown option \"{s}\"; see --help")),
++            name => o.files.push(resolve(name)?),
++        }
++    }
++    Ok(Some(o))
++}
++
++fn resolve(name: &str) -> Result<String, String> {
++    startup::absolute(name).map(|p| p.to_string_lossy().into_owned()).map_err(|e| format!("{name}: {e}"))
++}
++
++/// Stops with `message`: on the console and, for a Workbench start, in a requester.
++fn fail(message: &str) -> std::process::ExitCode {
++    startup::show_error("PdfCraft", message);
++    std::process::ExitCode::from(20)
++}
++
++// The main task's stack: a Shell start gives the program the Shell's (40,960 bytes on AROS One),
++// which the window loop overruns; the start-up code runs the program on 16 MiB instead.
++aros_startup::minimum_stack!(16 << 20);
++
++fn main() -> std::process::ExitCode {
++    // Unix-style probes (fonts, /etc/localtime) must not open "insert volume" requesters.
++    startup::quiet_dos();
++    // ABIv11's C library keeps one saved directory for the whole process and restores it on the
++    // main task at exit; whichever task changes directory first decides what is saved. This
++    // chdir, before any worker can make one, keeps the main task's own (Workbench start) lock.
++    if let Err(e) = std::env::set_current_dir(".") {
++        return fail(&format!("cannot keep the start directory: {e}"));
++    }
++    // aws-lc (digital signatures) detects the CPU's features here, as on the desktop.
++    pdfcraft_engine::sign::init_crypto();
++    let start = match startup::startup(&[launch::KEY]) {
++        Ok(s) => s,
++        Err(e) => return fail(&e),
++    };
++    SHELL.store(!start.workbench, std::sync::atomic::Ordering::Relaxed);
++    // Where PdfCraft.portable is looked for, for a standard library without current_exe.
++    match startup::program_dir() {
++        Ok(dir) => startup::set_default_env("PDFCRAFT_PROGRAM", &dir.join("PdfCraft")),
++        Err(e) => eprintln!("pdfcraft: cannot find the program's drawer: {e}"),
++    }
++    // Portable mode is settled before the logger exists: settling it logs, and the log file's
++    // own one-time setup asks where the data folder is, which would wait for itself.
++    let portable = pdfcraft_ui_egui::portable::current();
++    install_logger();
++    if let Some(w) = &portable.unwritable {
++        log::warn!("{w}");
++    }
++    let mut args: Vec<String> = if start.workbench { Vec::new() } else { std::env::args().skip(1).collect() };
++    let env = std::env::var("GUI_RENDERER").ok();
++    let choice = match launch::choose(&mut args, &start.tooltypes, env.as_deref(), egui_aros::RendererRequest::Auto) {
++        Ok(c) => c,
++        Err(e) => return fail(&e),
++    };
++    let mut options = match parse_args(args) {
++        Ok(Some(o)) => o,
++        Ok(None) => return std::process::ExitCode::SUCCESS,
++        Err(e) => return fail(&e),
++    };
++    options.files.extend(start.files);
++    log::info!("PdfCraft {RELEASE} for AROS ({TARGET}); start from {}", if start.workbench { "Workbench" } else { "Shell" });
++    match data_dir() {
++        Some(dir) => log::info!("settings and AutoRecover in {}", dir.display()),
++        None => log::warn!("no PdfCraftData folder (PdfCraft.portable is missing beside the program, or the drawer cannot be written): nothing is kept"),
++    }
++    log::info!("GUI_RENDERER requested {} (from {})", launch::request_name(choice.request), choice.source.name());
++    let code = run(options, choice);
++    // AROS's pthread library joins every thread, detached ones included, in its exit handler; the
++    // idle workers of rayon's global pool never end by themselves. Nothing uses it after this.
++    #[cfg(target_os = "aros")]
++    rayon_core::terminate_global_thread_pool();
++    log::info!("shutdown: exit({code})");
++    std::process::ExitCode::from(code)
++}
++
++/// Where PdfCraft 0.9.0 for AROS (the test releases) kept its settings: the same JSON the app
++/// saves under the key "pdfcraft". Read once, when this release has none of its own yet; the file
++/// is left where it is.
++const OLD_SETTINGS: &str = "/ENVARC/PdfCraft/ui.json";
++
++fn new_app(storage: &FileStorage, options: &Options) -> PdfCraftApp {
++    let mut app = PdfCraftApp::new();
++    app.units = pdfcraft_ui_egui::units::Unit::system();
++    let saved = eframe::Storage::get_string(storage, "pdfcraft").or_else(|| {
++        let old = std::fs::read_to_string(OLD_SETTINGS).ok()?;
++        log::info!("settings taken over from PdfCraft 0.9.0 ({OLD_SETTINGS})");
++        Some(old)
++    });
++    if let Some(json) = saved {
++        app.restore(&json);
++    }
++    app.integrated_titlebar = false;
++    // Autosave unsaved changes; offer to recover documents a crashed session left behind.
++    if let Some(dir) = pdfcraft_ui_egui::RecoveryStore::default_dir() {
++        app.enable_recovery(pdfcraft_ui_egui::RecoveryStore::new(dir));
++    }
++    app.ocr_verify.dictionary_dir = pdfcraft_ui_egui::default_dictionary_dir();
++    // With the preference on, last session's files come back first; files named at the start
++    // open after them, in front.
++    app.reopen_last_files(&options.files);
++    for path in &options.files {
++        app.open_path(path);
++    }
++    app
++}
++
++/// The app as egui-aros runs it: eframe's `raw_input_hook`, `logic` and `ui` (its unsaved-changes
++/// prompt cancels the close itself and closes the window once answered), and the screenshot and
++/// test-step hooks.
++struct Host {
++    app: PdfCraftApp,
++    frame: eframe::Frame,
++    ctx: egui::Context,
++    screenshot: Option<(String, u64)>,
++    done: bool,
++    renderer_logged: bool,
++    steps: std::collections::VecDeque<Step>,
++    frame_no: u64,
++    step_shot: Option<String>,
++    /// Per frame: (whole frame, raster + present), for the summary in the log at shutdown.
++    frame_costs: Vec<(Duration, Duration)>,
++}
++
++/// One log line: frames, and the median, mean and longest frame and raster+present times.
++fn frame_summary(costs: &[(Duration, Duration)]) -> String {
++    if costs.is_empty() {
++        return "no frames".to_owned();
++    }
++    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
++    let stats = |mut v: Vec<f64>| {
++        v.sort_by(f64::total_cmp);
++        let mean = v.iter().sum::<f64>() / v.len() as f64;
++        format!("median {:.0} ms, mean {:.0} ms, max {:.0} ms", v[v.len() / 2], mean, v[v.len() - 1])
++    };
++    format!(
++        "{} frames; frame {}; raster+present {}",
++        costs.len(),
++        stats(costs.iter().map(|c| ms(c.0)).collect()),
++        stats(costs.iter().map(|c| ms(c.1)).collect())
++    )
++}
++
++impl egui_aros::App for Host {
++    // --screenshot needs the frame's pixels; with OpenGL they are read back only then.
++    fn wants_pixels(&self) -> bool {
++        self.screenshot.is_some() || self.step_shot.is_some()
++    }
++
++    fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
++        self.app.raw_input_hook(&self.ctx, raw);
++    }
++
++    fn logic(&mut self, ctx: &egui::Context) {
++        // --screenshot counts frames, and with no idle poll an untouched window draws none after
++        // it settles: keep drawing until the picture is taken.
++        if self.screenshot.is_some() && !self.done {
++            ctx.request_repaint();
++        }
++        self.app.logic(ctx, &mut self.frame);
++        while self.steps.front().is_some_and(|s| s.frame <= self.frame_no) {
++            let Some(step) = self.steps.pop_front() else { break };
++            if let Some(paths) = step.pick {
++                log::info!("test step {}: the next file dialog answers {paths:?}", step.frame);
++                self.app.pick_override = Some(paths);
++            }
++            if let Some(path) = step.open {
++                log::info!("test step {}: open {path}: {:?}", step.frame, self.app.open_path(&path));
++            }
++            if let Some(id) = step.run {
++                log::info!("test step {}: {id}", step.frame);
++                self.app.run_command(&id);
++            }
++            if step.screenshot.is_some() {
++                self.step_shot = step.screenshot;
++            }
++            if step.quit {
++                log::info!("test step {}: quit", step.frame);
++                self.done = true;
++            }
++            ctx.request_repaint();
++        }
++        if !self.steps.is_empty() {
++            ctx.request_repaint();
++        }
++    }
++
++    fn ui(&mut self, ui: &mut egui::Ui) {
++        self.app.ui(ui, &mut self.frame);
++    }
++
++    fn quit_requested(&self) -> bool {
++        self.done
++    }
++
++    fn frame_done(&mut self, report: &egui_aros::FrameReport, renderer: &egui_aros::raster::Renderer) {
++        self.frame_no = report.frame;
++        let drawn = report.raster + report.present;
++        self.frame_costs.push((report.logic + report.ui + report.tessellate + report.textures + drawn, drawn));
++        // RUST_LOG=debug: one line per frame, to see what woke the loop and what the frame cost.
++        log::debug!(
++            "frame {} {}x{}: slept {:?} (timeout {:?}, by timeout {}), late {:?}, events {}, logic {:?} ui {:?} tessellate {:?} raster {:?} present {:?}, next repaint {:?}",
++            report.frame, report.width, report.height, report.waited, report.wait_timeout, report.woke_by_timeout, report.repaint_late,
++            report.events, report.logic, report.ui, report.tessellate, report.raster, report.present, report.next_repaint
++        );
++        if let Some(path) = self.step_shot.take() {
++            match write_png(&path, renderer) {
++                Ok(()) => log::info!("test step: wrote {path}"),
++                Err(e) => log::error!("test step: screenshot {path}: {e}"),
++            }
++        }
++        if !self.renderer_logged {
++            self.renderer_logged = true;
++            log::info!("GUI_RENDERER using {}", egui_aros::renderer_name());
++            log_tasks("first frame");
++        }
++        if let Some((path, frames)) = &self.screenshot
++            && report.frame >= *frames
++        {
++            match write_png(path, renderer) {
++                Ok(()) => log::info!("wrote {path}"),
++                Err(e) => log::error!("screenshot {path}: {e}"),
++            }
++            self.done = true;
++        }
++    }
++}
++
++fn run(mut options: Options, choice: launch::RendererChoice) -> u8 {
++    let (request, narrowed) = launch::effective(choice);
++    if let Some(why) = narrowed {
++        log::info!("GUI_RENDERER AUTO uses the CPU: {why}");
++    }
++    // As large as the screen allows, up to 1280x860; --window sets it exactly.
++    let (sw, sh) = egui_aros::screen_size().map_or((1296, 908), |(w, h)| (w as i32, h as i32));
++    let (w, h) = options.window.unwrap_or((1280.min(sw - 16).max(800), 860.min(sh - 48).max(500)));
++    let (w, h) = (w.max(1) as u32, h.max(1) as u32);
++    let ctx = egui::Context::default();
++    let mut storage = FileStorage::open(data_dir().map(|d| d.join("app.json")));
++    let app = new_app(&storage, &options);
++    log_tasks("app created");
++    let mut host = Host {
++        app,
++        frame: eframe::Frame::_new_kittest(),
++        ctx: ctx.clone(),
++        screenshot: options.screenshot.clone().map(|p| (p, options.screenshot_frames)),
++        done: false,
++        renderer_logged: false,
++        steps: options.test_steps.drain(..).collect(),
++        frame_no: 0,
++        step_shot: None,
++        frame_costs: Vec::new(),
++    };
++    let run_options = egui_aros::Options {
++        title: "PdfCraft".to_owned(),
++        inner_size: (w, h),
++        min_inner_size: Some((640, 400)),
++        clear_color: [0xf3, 0xf3, 0xf3],
++        // No idle poll: as eframe on the desktop, the loop sleeps until input, a repaint the app
++        // asks for, or a wake-up from another thread (a page rendered in the background). A poll
++        // is a full frame.
++        idle_poll: None,
++        renderer: request,
++        ..Default::default()
++    };
++    // A panic below the app (renderer, window) unwinds to here on ABIv11, so the shutdown below
++    // still runs.
++    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| egui_aros::run(run_options, ctx, &mut host)))
++        .unwrap_or_else(|_| Err(egui_aros::Error::Window("the window loop stopped after a panic".into())));
++    if let Some(info) = egui_aros::renderer_info() {
++        log::info!("GUI_RENDERER {}", info.summary());
++    }
++    log::info!("frames: {}", frame_summary(&host.frame_costs));
++    let code = match result {
++        Ok(()) => 0,
++        Err(e) => {
++            log::error!("{e}");
++            if !SHELL.load(std::sync::atomic::Ordering::Relaxed) {
++                startup::show_error("PdfCraft", &e.to_string());
++            }
++            20
++        }
++    };
++    // As eframe does at exit: the app's settings into the store, then on_exit.
++    if host.screenshot.is_none() {
++        host.app.save(&mut storage);
++        eframe::Storage::flush(&mut storage);
++    }
++    host.app.on_exit(None);
++    drop(host);
++    log::info!("shutdown: application state dropped");
++    // AROS's pthread library waits for every thread when the program exits: name the tasks still
++    // there, so a worker that does not end can be found in the log.
++    log_tasks("shutdown");
++    code
++}
++
++/// Logs the program's threads still present (`pthread thread #N` on AROS), at shutdown and, with
++/// PDFCRAFT_LOG_TASKS set, at start-up points too.
++fn log_tasks(when: &str) {
++    if when != "shutdown" && std::env::var_os("PDFCRAFT_LOG_TASKS").is_none() {
++        return;
++    }
++    let threads: Vec<String> = startup::task_names().into_iter().filter(|t| t.starts_with("pthread")).collect();
++    log::info!("{when}: threads: {}", if threads.is_empty() { "none".to_owned() } else { threads.join(", ").replace('\t', ":") });
++}
++
++fn write_png(path: &str, r: &egui_aros::raster::Renderer) -> Result<(), String> {
++    let img = craft_image_codecs::Image::from_u8(r.width as u32, r.height as u32, craft_image_codecs::ChannelLayout::Rgba, r.frame.clone())
++        .map_err(|e| e.to_string())?;
++    let png = craft_image_codecs::encode(&img, craft_image_codecs::Format::Png, &craft_image_codecs::EncodeOptions::default()).map_err(|e| e.to_string())?;
++    std::fs::write(path, png).map_err(|e| e.to_string())
++}
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index cc5231dad55f03e953ad2fca109eb656831c20e9..8d8b7d396aafbcd76574a39f791fcf9acd8d7bba 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -30,8 +30,6 @@ pdfcraft-model = { workspace = true }
+ pdfcraft-platform = { workspace = true }
+ egui = { workspace = true, features = ["bytemuck", "default_fonts", "monochrome_emoji_fonts"] }
+ egui_extras = { workspace = true }
+-# `glow` is always on: `eframe::App::on_exit` takes a GL context when that feature is enabled.
+-eframe = { workspace = true, features = ["default_fonts", "wgpu", "glow", "accesskit", "persistence", "links", "clipboard"] }
+ serde = { workspace = true }
+ serde_json = { workspace = true }
+ log = { workspace = true }
+@@ -54,6 +52,15 @@ unicode-bidi = "0.3"
+ # that put fallback faces on the interface's baseline (#1676); the same skrifa egui uses.
+ skrifa = "0.44"
+ 
++# `glow` is always on: `eframe::App::on_exit` takes a GL context when that feature is enabled.
++# AROS: no wgpu, AccessKit or links (no backend there; egui-aros runs the app and opens links
++# with OpenURL), and no eframe persistence (the AROS host keeps the settings itself).
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++eframe = { workspace = true, features = ["default_fonts", "wgpu", "glow", "accesskit", "persistence", "links", "clipboard"] }
++
++[target.'cfg(target_os = "aros")'.dependencies]
++eframe = { workspace = true, features = ["default_fonts", "glow", "clipboard"] }
++
+ # AROS: no self-update. Releases come through the AROS package catalogue, and the updater's
+ # HTTPS stack (hyper, rustls) has no AROS build.
+ [target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+diff --git a/crates/ui-egui/src/platform/portable.rs b/crates/ui-egui/src/platform/portable.rs
+index fcd6053fd41110cc6216eee6394285c59541aed7..82a7f3803b69728884ab485ce1df3fe4306dd790 100644
+--- a/crates/ui-egui/src/platform/portable.rs
++++ b/crates/ui-egui/src/platform/portable.rs
+@@ -52,6 +52,10 @@ pub fn current() -> &'static Portable {
+     static CURRENT: OnceLock<Portable> = OnceLock::new();
+     CURRENT.get_or_init(|| {
+         let exe = std::env::current_exe().ok();
++        // AROS: the standard library for the Raspberry Pi has no current_exe; the AROS host
++        // names the program in PDFCRAFT_PROGRAM (found with DOS) before this runs.
++        #[cfg(target_os = "aros")]
++        let exe = exe.or_else(|| std::env::var_os("PDFCRAFT_PROGRAM").map(PathBuf::from));
+         let portable = resolve(exe.as_deref().and_then(Path::parent));
+         if let Some(dir) = &portable.dir {
+             log::info!("portable mode: settings are kept in {}", dir.display());

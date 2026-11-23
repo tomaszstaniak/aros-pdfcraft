@@ -1,0 +1,95 @@
+{
+  "name": "PdfCraft",
+  "version": "0.22.0",
+  "release": "0.22.0",
+  "upstream_version": "0.22.0 (tag v0.22.0, ac140f80)",
+  "drawer": "PdfCraft",
+  "stack": 16777216,
+  "tooltypes": [
+    "GUI_RENDERER=AUTO"
+  ],
+  "icon_source": "work:assets/app-icon/hicolor/64x64/apps/ai.storyteller.pdfcraft.png",
+  "source_archive": "PdfCraft-0.22.0-source.zip",
+  "source_archive_exclude": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "project.json"
+  ],
+  "notices": [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+    "ATTRIBUTION.md"
+  ],
+  "targets": {
+    "aros-x86_64-abiv11-pc": {
+      "system": "AROS x86_64, ABIv11 distributions",
+      "sdk": "x86_64 ABIv11 SDK (deadwood2/AROS)",
+      "notice": "notices/aros-x86_64-abiv11-pc.txt",
+      "build": {
+        "lto": null,
+        "panic": "unwind",
+        "features": []
+      },
+      "limitations": [
+        "- OpenGL: AROS One 1.3 has only Mesa's software renderer, so AUTO uses CPU",
+        "  there. GPU works with it but draws a frame in seconds; use it only to try."
+      ]
+    },
+    "aros-x86_64-abiv1-pc": {
+      "system": "AROS x86_64, mainline ABIv1 (nightly 2026-11-06 or later)",
+      "sdk": "x86_64 mainline ABIv1 SDK of nightly 2026-11-10",
+      "notice": "notices/aros-x86_64-abiv1-pc.txt",
+      "build": {
+        "lto": null,
+        "panic": "abort",
+        "features": []
+      },
+      "limitations": [
+        "- AUTO uses CPU on this system: a program that has opened OpenGL leaves its",
+        "  log file in use after it ends, and the Shell it ran in stops redirecting",
+        "  the output of later programs (seen on nightly 2026-11-10). GPU opens",
+        "  OpenGL all the same; with VirGL in an emulator it drew correctly at about",
+        "  half a second a frame. Hardware OpenGL drivers have not been tested.",
+        "- Run one PdfCraft at a time: AutoRecover cannot tell that another PdfCraft",
+        "  is running and may take over its recovery data."
+      ]
+    },
+    "aros-aarch64-abiv1-raspi": {
+      "system": "AROS on Raspberry Pi, AArch64 ABIv1 (nightly 2026-11-06 or later)",
+      "sdk": "Raspberry Pi AArch64 ABIv1 SDK of nightly 2026-11-10",
+      "notice": "notices/aros-aarch64-abiv1-raspi.txt",
+      "build": {
+        "lto": null,
+        "panic": "abort",
+        "features": []
+      },
+      "limitations": [
+        "- OpenGL has not been tested on Pi hardware, so AUTO uses CPU. GPU opens",
+        "  OpenGL; save your work before you try it.",
+        "- Run one PdfCraft at a time: AutoRecover cannot tell that another PdfCraft",
+        "  is running and may take over its recovery data.",
+        "- Tested in an emulator only, not on a physical Raspberry Pi."
+      ]
+    }
+  },
+  "limitations": [
+    "- No printing: export to PDF or to pictures instead.",
+    "- No text recognition (OCR): its recognition models are not in the package.",
+    "- The interface is in English only.",
+    "- Changes of the whole window (scrolling, zooming, opening a dialog) redraw",
+    "  all of it; on slow machines and in emulators these follow with a delay.",
+    "- Fonts for Japanese, Korean and Chinese are not built in. Text in these",
+    "  scripts is shown as boxes unless the document embeds its own font.",
+    "- Files dropped on the window are not opened. File lists and formatted",
+    "  (HTML) text are not exchanged through the clipboard.",
+    "- Digital signatures, the clipboard, keyboard layouts other than the US one",
+    "  and a start from Workbench have not been tested on AROS in this release.",
+    "- No automatic updates: install new versions with the AROS package manager",
+    "  or by unpacking the new archive. The MCP server (pdfcraft-cli mcp) has",
+    "  been tested only for its handshake and tool list on AROS."
+  ],
+  "drawer_files": {
+    "PdfCraft.portable": "PdfCraft.portable"
+  }
+}

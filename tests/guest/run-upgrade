@@ -1,0 +1,37 @@
+.KEY RUNDIR/A,MACHINE/A
+.BRA [
+.KET ]
+; Upgrade check with apkg from local indexes, under RAM: except the settings file of the previous
+; release, ENVARC:PdfCraft/ui.json, which it writes and this script deletes by name at the end.
+; Payload in RAM:ctest: apkg, old.zip + idx-old.json (the previous release), pc.zip + idx.json
+; (the new package), steps-pkg.json, steps-pkg2.json, two-pages.pdf, run-use.
+; Execute RAM:ctest/run-upgrade <results directory> <machine name>
+FailAt 21
+Protect RAM:ctest/apkg +e
+MakeDir RAM:pk
+MakeDir RAM:pk/cache
+Copy RAM:ctest/old.zip RAM:pk/cache/pdfcraft.zip
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx-old.json install pdfcraft --yes >[RUNDIR]/old-install.txt
+Echo $RC >[RUNDIR]/old-install.rc
+List ENVARC:PdfCraft >[RUNDIR]/envarc-before.txt
+Stack 4000000
+RAM:pk/PdfCraft/pdfcraft-cli info RAM:ctest/two-pages.pdf >[RUNDIR]/old-cli.txt
+Echo $RC >[RUNDIR]/old-cli.rc
+RAM:pk/PdfCraft/PdfCraft --screenshot RAM:ctest/old.png RAM:ctest/two-pages.pdf
+Echo $RC >[RUNDIR]/old-gui.rc
+Copy ENVARC:PdfCraft/ui.json [RUNDIR]/old-ui.json
+Copy RAM:ctest/pc.zip RAM:pk/cache/pdfcraft.new.zip
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json outdated >[RUNDIR]/outdated.txt
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json upgrade pdfcraft --yes >[RUNDIR]/upgrade.txt
+Echo $RC >[RUNDIR]/upgrade.rc
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json verify pdfcraft >[RUNDIR]/verify.txt
+Echo $RC >[RUNDIR]/verify.rc
+List RAM:pk/PdfCraft ALL >[RUNDIR]/after-upgrade.txt
+Execute RAM:ctest/run-use [RUNDIR]
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json remove pdfcraft --yes >[RUNDIR]/remove.txt
+Echo $RC >[RUNDIR]/remove.rc
+List RAM:pk ALL >[RUNDIR]/after-remove.txt
+Delete ENVARC:PdfCraft/ui.json
+Delete ENVARC:PdfCraft
+List ENVARC: PAT=PdfCraft#? >[RUNDIR]/envarc-after.txt
+Echo "done" >[RUNDIR]/upgrade-done.txt

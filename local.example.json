@@ -4,5 +4,7 @@
   "aros_strip": "/path/to/abiv11-toolchain/x86_64-aros-strip",
   "aros_sdk": "/path/to/abiv11-sdk",
   "rust_aros": "/path/to/rust-aros",
-  "toolchain": "your-private-aros-std-toolchain"
+  "toolchain": "your-private-aros-std-toolchain",
+  "egui_aros": "/path/to/egui-aros",
+  "aros_src": "/path/to/deadwood2-AROS"
 }

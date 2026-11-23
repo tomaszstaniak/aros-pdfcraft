@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:09:39 +0100
+Subject: [PATCH] AROS: FONTS: as the system font folder
+
+---
+ crates/engine/src/text_fonts.rs | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/crates/engine/src/text_fonts.rs b/crates/engine/src/text_fonts.rs
+index e2b413d88d613f5a89c10cba529172fbb88732f9..44259c65c95bae5a6070c45344bc2994530a66ea 100644
+--- a/crates/engine/src/text_fonts.rs
++++ b/crates/engine/src/text_fonts.rs
+@@ -23,6 +23,10 @@ pub fn installed_directories() -> Vec<PathBuf> {
+             dirs.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+         }
+         dirs
++    } else if cfg!(target_os = "aros") {
++        // FONTS: in the -nix path mode the program runs in. The Unix folders below would name
++        // volumes that do not exist (usr, home), each a "Please insert volume" request.
++        vec![PathBuf::from("/FONTS")]
+     } else {
+         let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
+         if let Some(home) = home {

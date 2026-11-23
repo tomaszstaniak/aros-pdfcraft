@@ -2,9 +2,39 @@
   "repositories": {
     "pdfcraft": {
       "url": "https://github.com/storytold/pdfcraft.git",
-      "commit": "50f261d70c8e199600a82dbaa6912c6fbc4b4612",
+      "commit": "ac140f809d554981a5276d748e6193fcf4d4bdfa",
       "license": "MIT OR Apache-2.0",
-      "role": "build source; patches/pdfcraft/series applies in order"
+      "role": "build source (tag v0.22.0, 2026-11-23); patches/pdfcraft/series applies in order",
+      "tag": "v0.22.0",
+      "note": "previous base: 0.9.0 50f261d70c8e199600a82dbaa6912c6fbc4b4612 (series 0001-0011 until 2026-11-23, in git history; released as v0.9.0-test4 from branch release/test4)"
+    },
+    "storytold-egui": {
+      "url": "https://github.com/storytold/egui.git",
+      "commit": "725a39fca940f77149ffbb9c58eef405a16997bc",
+      "license": "MIT OR Apache-2.0",
+      "role": "egui/eframe/egui-winit/egui_glow 0.37.0 as locked by PdfCraft v0.22.0; AROS patches via egui-aros",
+      "prepared_by": "egui-aros"
+    },
+    "storytold-winit": {
+      "url": "https://github.com/storytold/winit.git",
+      "commit": "a517b3846ee8457d84ee4975110bfda6797c44dc",
+      "license": "Apache-2.0",
+      "role": "winit 0.30.13 fork as locked by PdfCraft v0.22.0; contrib AROS backend applied via egui-aros",
+      "prepared_by": "egui-aros"
+    },
+    "egui-aros": {
+      "url": "https://github.com/tomaszstaniak/egui-aros.git",
+      "commit": "0fd7c5e3e3892b53bb59653db7af1f054b810398",
+      "branch": "egui-0.37",
+      "license": "MIT OR Apache-2.0",
+      "role": "shared GUI integration (egui 0.37); consumed through its ea.py vendor, never copied",
+      "note": "branch egui-0.37 with rfd and arboard for AROS (2026-11-23)"
+    },
+    "craft-fonts": {
+      "url": "https://github.com/storytold/craft-fonts.git",
+      "commit": "b076417b5880bd4154bd22f00695b1d28c6bea83",
+      "license": "repository Apache-2.0; fonts under their own licences",
+      "role": "font data, the commit PdfCraft 0.22.0's release workflow embeds; the build embeds the set named in scripts/port.json craft_fonts"
     }
   }
 }

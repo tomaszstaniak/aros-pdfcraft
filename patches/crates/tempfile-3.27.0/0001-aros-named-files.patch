@@ -8,6 +8,10 @@ files. Use exclusive std opens and hard_link for no-clobber publication;
 unsupported operations fail without deleting existing files. No check-then-
 rename fallback. Unnamed temporary files explicitly remain unsupported.
 Status: local-only; compile and named-file lifecycle acceptance pending.
+AArch64 (2026-11-23): its std has no device and inode numbers, so reopen
+refuses there instead of reopening without the identity check. A std that
+is not unix-family (the Raspberry Pi profile) uses tempfile's own fallback
+for other systems, as before this patch.
 ---
 --- a/Cargo.toml
 +++ b/Cargo.toml
@@ -24,7 +28,7 @@ Status: local-only; compile and named-file lifecycle acceptance pending.
 +++ b/src/file/imp/mod.rs
 @@ -1,4 +1,5 @@
 -#[cfg_attr(any(unix, target_os = "redox", target_os = "wasi"), path = "unix.rs")]
-+#[cfg_attr(target_os = "aros", path = "aros.rs")]
++#[cfg_attr(all(target_os = "aros", unix), path = "aros.rs")]
 +#[cfg_attr(any(all(unix, not(target_os = "aros")), target_os = "redox", target_os = "wasi"), path = "unix.rs")]
  #[cfg_attr(windows, path = "windows.rs")]
  #[cfg_attr(
@@ -47,7 +51,7 @@ Status: local-only; compile and named-file lifecycle acceptance pending.
  pub use any::*;
 --- /dev/null
 +++ b/src/file/imp/aros.rs
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,47 @@
 +use std::fs::{self, File, OpenOptions};
 +use std::io;
 +use std::path::Path;
@@ -62,6 +66,7 @@ Status: local-only; compile and named-file lifecycle acceptance pending.
 +    Err(io::Error::new(io::ErrorKind::Unsupported, "unnamed temporary files are not accepted by this AROS adapter"))
 +}
 +
++#[cfg(target_arch = "x86_64")]
 +pub fn reopen(file: &File, path: &Path) -> io::Result<File> {
 +    use std::os::unix::fs::MetadataExt;
 +    let reopened = OpenOptions::new().read(true).write(true).open(path)?;
@@ -71,6 +76,12 @@ Status: local-only; compile and named-file lifecycle acceptance pending.
 +        return Err(io::Error::new(io::ErrorKind::NotFound, "temporary path was replaced"));
 +    }
 +    Ok(reopened)
++}
++
++/// The AArch64 std has no device and inode numbers to check the reopened file against.
++#[cfg(not(target_arch = "x86_64"))]
++pub fn reopen(_file: &File, _path: &Path) -> io::Result<File> {
++    Err(io::Error::new(io::ErrorKind::Unsupported, "reopening a temporary file is not accepted by this AROS adapter on AArch64"))
 +}
 +
 +pub fn persist(old: &Path, new: &Path, overwrite: bool) -> io::Result<()> {
