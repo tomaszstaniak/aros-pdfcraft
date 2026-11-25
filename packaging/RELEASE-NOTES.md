@@ -1,4 +1,4 @@
-# PdfCraft 0.22.0 for AROS
+# PdfCraft 0.22.0 for AROS, revision 1
 
 The AROS port of PdfCraft 0.22.0, a PDF viewer and editor. It is built from the PdfCraft 0.22.0 release (tag `v0.22.0`), for three AROS systems.
 
@@ -6,14 +6,26 @@ The AROS port of PdfCraft 0.22.0, a PDF viewer and editor. It is built from the 
 
 | File | System |
 |---|---|
-| `PdfCraft-0.22.0-aros-x86_64-abiv11-pc.zip` | AROS x86_64, ABIv11 distributions |
-| `PdfCraft-0.22.0-aros-x86_64-abiv1-pc.zip` | AROS x86_64, mainline ABIv1 (nightly 2026-11-06 or later) |
-| `PdfCraft-0.22.0-aros-aarch64-abiv1-raspi.zip` | AROS on Raspberry Pi, AArch64 ABIv1 (mainline nightly 2026-11-06 or later) |
-| `PdfCraft-0.22.0-source.zip` | Port sources, patches, pinned inputs and build recipe |
+| `PdfCraft-0.22.0-aros-x86_64-abiv11-pc.zip` | AROS x86_64, ABIv11 distributions (unchanged, from the 0.22.0 release) |
+| `PdfCraft-0.22.0-r1-aros-x86_64-abiv1-pc.zip` | AROS x86_64, mainline ABIv1 (nightly 2026-11-24 or later) |
+| `PdfCraft-0.22.0-r1-aros-aarch64-abiv1-raspi.zip` | AROS on Raspberry Pi, AArch64 ABIv1 (mainline nightly 2026-11-24 or later) |
+| `PdfCraft-0.22.0-r1-source.zip` | Port sources, patches, pinned inputs and build recipe |
 
 Each package runs only on the system it was built for. `SHA256SUMS` lists the checksums. The packages can also be installed with the AROS package manager: `apkg install pdfcraft`.
 
-## What is new
+## What is new in revision 1
+
+Revision 1 is a rebuild of the mainline x86_64 and Raspberry Pi packages for AROS nightly builds from 2026-11-24 on. The programs have no other changes. `PdfCraft --version` prints `0.22.0-r1`.
+
+- The nightly of 2026-11-24 changed a system structure that programs are built against. Packages built before it do not start on that nightly or a later one, and these packages do not start on an earlier one.
+- On a nightly before 2026-11-24, keep PdfCraft 0.22.0.
+- The ABIv11 package is not affected and stays at 0.22.0.
+
+With the package manager: `apkg upgrade pdfcraft`. Settings and data in `PdfCraftData` are kept.
+
+Checked for this revision on the mainline x86_64 nightly of 2026-11-24, in an emulator: installation and verification with the package manager and a start from Workbench. The Raspberry Pi package was built the same way and not run for this revision.
+
+## What was new in 0.22.0
 
 This release moves from PdfCraft 0.9.0 (test 4) to PdfCraft 0.22.0. For the changes in the program itself, see the release notes of PdfCraft upstream. On the AROS side:
 
